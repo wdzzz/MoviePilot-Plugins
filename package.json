@@ -156,13 +156,13 @@
     "name": "插件管理中心",
     "description": "集成插件热重载、彻底卸载、重装等功能，支持本地和在线插件管理。",
     "labels": "插件,管理,工具",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/manager.png",
     "author": "madrays",
     "level": 1,
     "v2": true,
     "history": {
-      "v1.0.1": "新增重装功能"
+      "v1.0.2": "新增重装功能，修复图标路径"
     }
   }
 

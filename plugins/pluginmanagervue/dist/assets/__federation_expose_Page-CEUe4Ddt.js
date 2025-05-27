@@ -395,6 +395,18 @@ function toggleRepoUrlDisplay() {
   showFullRepoUrl.value = !showFullRepoUrl.value;
 }
 
+function getPluginIconPath(iconPath) {
+  if (!iconPath) return '';
+  
+  // 如果是网络图片则使用代理
+  if (iconPath.startsWith('http')) {
+    return `/api/v1/system/img/1?imgurl=${encodeURIComponent(iconPath)}`;
+  }
+  
+  // 本地图片使用相对路径
+  return `./plugin_icon/${iconPath}`;
+}
+
 function getUpdateStatusColor() {
   if (!onlinePluginInfo.value) return 'grey';
   
@@ -694,7 +706,7 @@ return (_ctx, _cache) => {
                                   (plugin.icon)
                                     ? (_openBlock(), _createBlock(_component_v_img, {
                                         key: 0,
-                                        src: plugin.icon
+                                        src: getPluginIconPath(plugin.icon)
                                       }, {
                                         placeholder: _withCtx(() => [
                                           _createVNode(_component_v_icon, { size: "12" }, {
@@ -894,7 +906,7 @@ return (_ctx, _cache) => {
                           (plugin.icon)
                             ? (_openBlock(), _createBlock(_component_v_img, {
                                 key: 0,
-                                src: plugin.icon,
+                                src: getPluginIconPath(plugin.icon),
                                 onError: handleImageError
                               }, {
                                 placeholder: _withCtx(() => [
@@ -1329,6 +1341,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const PageComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-dadc1066"]]);
+const PageComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-108575a4"]]);
 
 export { _export_sfc as _, PageComponent as default };
