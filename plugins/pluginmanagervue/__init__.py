@@ -15,13 +15,13 @@ from app.schemas.types import SystemConfigKey
 
 class PluginManagerVue(_PluginBase):
     # 插件名称
-    plugin_name = "插件管理器"
+    plugin_name = "插件管理中心"
     # 插件描述
-    plugin_desc = "集成插件热重载、彻底卸载等功能，支持本地和在线插件管理。"
+    plugin_desc = "集成插件热重载、彻底卸载、重装等功能，支持本地和在线插件管理。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/manager.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -87,6 +87,22 @@ class PluginManagerVue(_PluginBase):
                 "methods": ["GET"],
                 "summary": "获取上次重载的插件",
                 "description": "获取上次重载的插件列表",
+                "auth": "bear",
+            },
+            {
+                "path": "/reinstall",
+                "endpoint": self.reinstall_plugin,
+                "methods": ["POST"],
+                "summary": "重装插件",
+                "description": "重新安装指定插件",
+                "auth": "bear",
+            },
+            {
+                "path": "/online_info/{plugin_id}",
+                "endpoint": self.get_online_plugin_info,
+                "methods": ["GET"],
+                "summary": "获取在线插件信息",
+                "description": "获取指定插件的在线版本信息",
                 "auth": "bear",
             },
 
@@ -265,6 +281,116 @@ class PluginManagerVue(_PluginBase):
                 "message": f"重载插件失败: {str(e)}"
             }
 
+    def reinstall_plugin(self, payload: dict) -> Dict[str, Any]:
+        """重装插件"""
+        try:
+            plugin_id = payload.get('plugin_id')
+            if not plugin_id:
+                return {
+                    "success": False,
+                    "message": "插件ID不能为空"
+                }
+            
+            logger.info(f"准备重装插件: {plugin_id}")
+            
+            # 获取插件信息
+            plugin_manager = PluginManager()
+            local_plugins = plugin_manager.get_local_plugins()
+            target_plugin = None
+            
+            for plugin in local_plugins:
+                if plugin.id == plugin_id:
+                    target_plugin = plugin
+                    break
+            
+            if not target_plugin:
+                return {
+                    "success": False,
+                    "message": f"未找到插件: {plugin_id}"
+                }
+            
+            # 检查是否为本地插件
+            if target_plugin.repo_url == "local":
+                return {
+                    "success": False,
+                    "message": "本地插件不支持重装"
+                }
+            
+            # 获取插件仓库URL
+            repo_url = target_plugin.repo_url
+            if not repo_url:
+                # 尝试从插件市场获取
+                try:
+                    online_plugins = plugin_manager.get_online_plugins()
+                    for online_plugin in online_plugins:
+                        if online_plugin.id == plugin_id:
+                            repo_url = online_plugin.repo_url
+                            break
+                except Exception as e:
+                    logger.warning(f"获取在线插件信息失败: {e}")
+            
+            if not repo_url:
+                return {
+                    "success": False,
+                    "message": f"无法获取插件 {plugin_id} 的仓库地址"
+                }
+            
+            logger.info(f"开始重装插件 {target_plugin.plugin_name} v{target_plugin.plugin_version}")
+            
+            # 使用PluginHelper重新安装插件
+            try:
+                state, msg = PluginHelper().install(pid=plugin_id, repo_url=repo_url)
+                if not state:
+                    logger.error(f"插件 {target_plugin.plugin_name} 重装失败: {msg}")
+                    return {
+                        "success": False,
+                        "message": f"重装失败: {msg}"
+                    }
+                
+                logger.info(f"插件 {target_plugin.plugin_name} 重装成功")
+                
+                # 重装成功后自动重载插件
+                try:
+                    PluginManager().reload_plugin(plugin_id)
+                    Scheduler().update_plugin_job(plugin_id)
+                    logger.info(f"插件 {plugin_id} 重载成功")
+                except Exception as e:
+                    logger.warning(f"重装后重载插件失败: {e}")
+                
+                # 记录重载历史
+                if plugin_id not in self._last_reload_plugins:
+                    self._last_reload_plugins.insert(0, plugin_id)
+                else:
+                    self._last_reload_plugins.remove(plugin_id)
+                    self._last_reload_plugins.insert(0, plugin_id)
+                
+                # 只保留最近10个
+                self._last_reload_plugins = self._last_reload_plugins[:10]
+                
+                # 保存配置
+                self.update_config({
+                    "last_reload_plugins": self._last_reload_plugins
+                })
+                
+                return {
+                    "success": True,
+                    "message": f"插件 {target_plugin.plugin_name} 重装成功"
+                }
+                
+            except Exception as e:
+                logger.error(f"重装插件失败: {e}")
+                return {
+                    "success": False,
+                    "message": f"重装失败: {str(e)}"
+                }
+                
+        except Exception as e:
+            logger.error(f"重装插件失败: {e}")
+            return {
+                "success": False,
+                "message": f"重装插件失败: {str(e)}"
+            }
+
     def uninstall_plugin(self, payload: dict) -> Dict[str, Any]:
         """卸载/清理插件"""
         try:
@@ -378,6 +504,59 @@ class PluginManagerVue(_PluginBase):
             return {
                 "success": False,
                 "message": f"操作失败: {str(e)}"
+            }
+
+    def get_online_plugin_info(self, plugin_id: str) -> Dict[str, Any]:
+        """获取在线插件信息"""
+        try:
+            logger.info(f"获取在线插件信息: {plugin_id}")
+            
+            plugin_manager = PluginManager()
+            online_plugins = plugin_manager.get_online_plugins()
+            
+            if not online_plugins:
+                return {
+                    "success": False,
+                    "message": "无法获取在线插件列表"
+                }
+            
+            # 查找指定插件
+            target_plugin = None
+            for plugin in online_plugins:
+                if plugin.id == plugin_id:
+                    target_plugin = plugin
+                    break
+            
+            if not target_plugin:
+                return {
+                    "success": False,
+                    "message": f"未找到在线插件: {plugin_id}"
+                }
+            
+            # 返回插件信息
+            plugin_info = {
+                "id": target_plugin.id,
+                "plugin_name": target_plugin.plugin_name,
+                "plugin_version": target_plugin.plugin_version,
+                "plugin_author": target_plugin.plugin_author,
+                "plugin_desc": target_plugin.plugin_desc,
+                "repo_url": target_plugin.repo_url,
+                "has_update": target_plugin.has_update,
+                "history": target_plugin.history
+            }
+            
+            logger.info(f"找到在线插件: {target_plugin.plugin_name} v{target_plugin.plugin_version}")
+            
+            return {
+                "success": True,
+                "data": plugin_info
+            }
+            
+        except Exception as e:
+            logger.error(f"获取在线插件信息失败: {e}")
+            return {
+                "success": False,
+                "message": f"获取在线插件信息失败: {str(e)}"
             }
 
     def get_last_reload(self) -> Dict[str, Any]:
