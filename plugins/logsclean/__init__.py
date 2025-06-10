@@ -41,7 +41,7 @@ class LogsClean(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/clean.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -272,12 +272,14 @@ class LogsClean(_PluginBase):
             logger.info(f"{self.plugin_name}: 获取到 {len(installed_plugins)} 个已安装插件")
             
             # 构建ID到中文名的映射 - 同时以原始ID和小写ID为键
+            installed_plugin_ids = []  # 用于过滤已删除插件日志
             for plugin in installed_plugins:
                 plugin_id = getattr(plugin, 'id', None)
                 plugin_name = getattr(plugin, 'plugin_name', plugin_id)
                 if plugin_id and plugin_name:
                     plugin_name_map[plugin_id] = plugin_name
                     plugin_name_map[plugin_id.lower()] = plugin_name
+                    installed_plugin_ids.append(plugin_id.lower())  # 收集已安装插件ID
             
             # 添加特殊日志文件的显示名称映射
             special_logs_map = {
@@ -352,7 +354,19 @@ class LogsClean(_PluginBase):
                 if is_split_log:
                     split_num = re.match(r"^.+\.log\.(\d+)$", file_name).group(1)
                     plugin_name = f"{plugin_name} (分割{split_num}号)"
-                
+
+                # 过滤策略：对于已删除插件的日志，如果行数小于等于10，则不显示
+                is_special_log = plugin_id.lower() in special_logs_map
+                is_deleted_plugin = not is_special_log and not any(
+                    plugin_id.lower() == p_id or plugin_id.lower().startswith(p_id) or p_id.startswith(plugin_id.lower())
+                    for p_id in installed_plugin_ids
+                )
+
+                # 如果是已删除插件的日志且行数 <= 10，则跳过不显示
+                if is_deleted_plugin and lines_count != -1 and lines_count <= 10:
+                    logger.debug(f"{self.plugin_name}: 跳过已删除插件的少量日志: {plugin_id} (行数: {lines_count})")
+                    continue
+
                 # 生成结果项
                 result.append({
                     "id": file_name.replace(".log", ""),  # 使用文件全名作为唯一ID
@@ -360,7 +374,7 @@ class LogsClean(_PluginBase):
                     "size": file_size,
                     "lines_count": lines_count,
                     "path": str(log_file),
-                    "is_special": plugin_id.lower() in special_logs_map,
+                    "is_special": is_special_log,
                     "is_split": is_split_log,
                     "original_id": original_id,  # 存储原始插件ID
                     "file_name": file_name  # 存储完整文件名
@@ -889,22 +903,3 @@ class LogsClean(_PluginBase):
             "title": "插件日志清理",
             "subtitle": "定时清理插件产生的日志"
         }, None
-
-    def get_dashboard_meta(self) -> Optional[List[Dict[str, str]]]:
-        """
-        获取插件仪表盘元信息
-        返回示例：
-            [{
-                "key": "dashboard1", // 仪表盘的key，在当前插件范围唯一
-                "name": "仪表盘1" // 仪表盘的名称
-            }, {
-                "key": "dashboard2",
-                "name": "仪表盘2"
-            }]
-        """
-        return [
-            {
-                "key": "dashboard1",
-                "name": "插件日志清理"
-            }
-        ]

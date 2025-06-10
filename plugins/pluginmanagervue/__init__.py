@@ -1,7 +1,6 @@
 import shutil
 from pathlib import Path
 from typing import Any, List, Dict, Tuple, Optional
-from datetime import datetime
 
 from app.core.config import settings
 from app.core.plugin import PluginManager
@@ -21,7 +20,7 @@ class PluginManagerVue(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/manager.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -54,7 +53,7 @@ class PluginManagerVue(_PluginBase):
                 "endpoint": self.get_plugins,
                 "methods": ["GET"],
                 "summary": "获取插件列表",
-                "description": "获取所有插件信息，包括本地插件和已安装插件",
+                "description": "获取已安装的插件和本地插件，不显示未安装的在线插件",
                 "auth": "bear",
             },
             {
@@ -109,7 +108,7 @@ class PluginManagerVue(_PluginBase):
         ]
 
     def get_plugins(self) -> Dict[str, Any]:
-        """获取插件列表 - 只显示插件目录中真实存在的插件"""
+        """获取插件列表 - 显示已安装的插件和本地插件，不显示未安装的在线插件"""
         try:
             plugin_manager = PluginManager()
             
@@ -147,7 +146,13 @@ class PluginManagerVue(_PluginBase):
                 
                 # 判断安装状态：以已安装列表为准
                 is_installed = plugin.id in installed_plugins
-                
+
+                # 过滤策略：不显示未安装的在线插件
+                # 只显示：1. 已安装的插件（不管是在线还是本地）2. 本地插件（不管是否安装）
+                if plugin_type == "online" and not is_installed:
+                    logger.debug(f"跳过未安装的在线插件: {plugin.id}")
+                    continue
+
                 plugin_data = {
                     "id": plugin.id,
                     "name": plugin.plugin_name or plugin.id,
