@@ -192,6 +192,19 @@
     "history": {
       "v1.0": "首次发布"
     }
+  },
+  "MoriServitude": {
+    "name": "末日黑奴的自我修养",
+    "description": "监控AGSVPT站点官种保种情况，访问mybonus.php页面获取实时数据，计算距离退休时间",
+    "labels": "保种,监控,AGSVPT,退休,官种",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/agsv.png",
+    "author": "madrays",
+    "level": 2,
+    "v2": true,
+    "history": {
+      "v1.0.0": "首次发布，支持自动识别AGSVPT站点、访问mybonus.php获取官种数据、5TB体积检查、基于开始日期的退休进度计算、使用TB作为单位显示"
+    }
   }
 
 } 
