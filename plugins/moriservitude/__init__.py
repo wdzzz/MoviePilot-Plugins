@@ -30,7 +30,7 @@ from app.db.site_oper import SiteOper
 from app.helper.sites import SitesHelper
 
 
-class MoriServitude(_PluginBase):
+class moriservitude(_PluginBase):
     # 插件名称
     plugin_name = "末日黑奴的自我修养"
     # 插件描述  
