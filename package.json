@@ -205,6 +205,19 @@
     "history": {
       "v1.0.0": "首次发布，支持自动识别AGSVPT站点、访问mybonus.php获取官种数据、5TB体积检查、基于开始日期的退休进度计算、使用TB作为单位显示"
     }
+  },
+  "xiaomirouter": {
+    "name": "小米路由器监控",
+    "description": "自动登录并监控小米路由器状态，支持端口映射列表/添加/删除与快捷一键切换（适用于临时开启/关闭 SSH 或管理端口等场景）",
+    "labels": "路由器,小米,端口映射,SSH,网络",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/xiaomi.png",
+    "author": "madrays",
+    "level": 2,
+    "v2": true,
+    "history": {
+        "v1.0.0": "首次发布：登录、状态监控、端口列表/添加/删除、通知"
+    }
   }
 
 } 
