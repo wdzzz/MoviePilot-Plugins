@@ -1,6 +1,6 @@
 """
 影巢签到插件
-版本: 1.0.0
+版本: 1.1.0
 作者: madrays
 功能:
 - 自动完成影巢(HDHive)每日签到
@@ -10,6 +10,7 @@
 - 默认使用代理访问
 
 修改记录:
+- v1.1.0: 域名改为可配置，统一API拼接(Referer/Origin/接口)，精简日志
 - v1.0.0: 初始版本，基于影巢网站结构实现自动签到
 """
 import time
@@ -42,7 +43,7 @@ class HdhiveSign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/hdhive.ico"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -68,10 +69,11 @@ class HdhiveSign(_PluginBase):
     _scheduler: Optional[BackgroundScheduler] = None
     _current_trigger_type = None  # 保存当前执行的触发类型
 
-    # 影巢站点配置
-    _site_url = "https://hdhive.online/"
-    _signin_api = "https://hdhive.online/api/customer/user/checkin"
-    _user_info_api = "https://hdhive.online/api/customer/user/info"
+    # 影巢站点配置（域名可配置）
+    _base_url = "https://hdhive.online"
+    _site_url = f"{_base_url}/"
+    _signin_api = f"{_base_url}/api/customer/user/checkin"
+    _user_info_api = f"{_base_url}/api/customer/user/info"
 
     def init_plugin(self, config: dict = None):
         # 停止现有任务
@@ -85,6 +87,12 @@ class HdhiveSign(_PluginBase):
                 self._notify = config.get("notify")
                 self._cron = config.get("cron")
                 self._onlyonce = config.get("onlyonce")
+                # 新增：站点地址配置
+                self._base_url = (config.get("base_url") or self._base_url or "").rstrip("/") or "https://hdhive.online"
+                # 基于 base_url 统一构建接口地址
+                self._site_url = f"{self._base_url}/"
+                self._signin_api = f"{self._base_url}/api/customer/user/checkin"
+                self._user_info_api = f"{self._base_url}/api/customer/user/info"
                 self._max_retries = int(config.get("max_retries", 3))
                 self._retry_interval = int(config.get("retry_interval", 30))
                 self._history_days = int(config.get("history_days", 30))
@@ -107,6 +115,7 @@ class HdhiveSign(_PluginBase):
                     "cookie": self._cookie,
                     "notify": self._notify,
                     "cron": self._cron,
+                    "base_url": self._base_url,
                     "max_retries": self._max_retries,
                     "retry_interval": self._retry_interval,
                     "history_days": self._history_days
@@ -143,15 +152,8 @@ class HdhiveSign(_PluginBase):
                     "status": "跳过: 有正在进行的重试任务"
                 }
         
-        logger.info("============= 开始影巢签到 =============")
-        logger.info(f"🔍 [调试] 签到参数: retry_count={retry_count}, extended_retry={extended_retry}")
-        logger.info(f"🔍 [调试] 触发类型: {self._current_trigger_type}")
-        logger.info(f"🔍 [调试] 插件配置:")
-        logger.info(f"  - 启用状态: {self._enabled}")
-        logger.info(f"  - 通知开关: {self._notify}")
-        logger.info(f"  - Cookie长度: {len(self._cookie) if self._cookie else 0}")
-        logger.info(f"  - 最大重试: {self._max_retries}")
-        logger.info(f"  - 重试间隔: {self._retry_interval}秒")
+        logger.info("开始影巢签到")
+        logger.debug(f"参数: retry={retry_count}, ext_retry={extended_retry}, trigger={self._current_trigger_type}")
 
         notification_sent = False  # 标记是否已发送通知
         sign_dict = None
@@ -159,9 +161,9 @@ class HdhiveSign(_PluginBase):
 
         # 根据重试情况记录日志
         if retry_count > 0:
-            logger.info(f"🔄 [调试] 当前为第{retry_count}次常规重试")
+            logger.debug(f"常规重试: 第{retry_count}次")
         if extended_retry > 0:
-            logger.info(f"🔄 [调试] 当前为第{extended_retry}次延长重试")
+            logger.debug(f"延长重试: 第{extended_retry}次")
         
         try:
             if not self._is_manual_trigger() and self._is_already_signed_today():
@@ -242,19 +244,19 @@ class HdhiveSign(_PluginBase):
                     notification_sent = True
                 return sign_dict
             
-            logger.info("开始执行签到...")
+            logger.info("执行签到...")
             
             state, message = self._signin_base()
             
             if state:
-                logger.info(f"影巢签到API返回消息: {message}")
+                logger.debug(f"签到API消息: {message}")
                 
                 if "已经签到" in message or "签到过" in message:
                     sign_status = "已签到"
                 else:
                     sign_status = "签到成功"
                 
-                logger.info(f"影巢签到状态设置为: {sign_status}")
+                logger.debug(f"签到状态: {sign_status}")
 
                 # --- 核心修复：插件自身逻辑计算连续签到天数 ---
                 today_str = datetime.now().strftime('%Y-%m-%d')
@@ -391,12 +393,12 @@ class HdhiveSign(_PluginBase):
                 return False, "Cookie中缺少'token'"
 
             user_id = None
-            referer = "https://hdhive.online/"
+            referer = self._site_url
             try:
                 decoded_token = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
                 user_id = decoded_token.get('sub')
                 if user_id:
-                    referer = f"https://hdhive.online/user/{user_id}"
+                    referer = f"{self._base_url}/user/{user_id}"
             except Exception as e:
                 logger.warning(f"从Token中解析用户ID失败，将使用默认Referer: {e}")
 
@@ -406,7 +408,7 @@ class HdhiveSign(_PluginBase):
             headers = {
                 'User-Agent': ua,
                 'Accept': 'application/json, text/plain, */*',
-                'Origin': 'https://hdhive.online',
+                'Origin': self._base_url,
                 'Referer': referer,
                 'Authorization': f'Bearer {token}',
             }
@@ -690,6 +692,27 @@ class HdhiveSign(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'base_url',
+                                            'label': '站点地址',
+                                            'placeholder': '例如：https://hdhive.online 或新域名',
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
                                     'md': 3
                                 },
                                 'content': [
@@ -772,7 +795,7 @@ class HdhiveSign(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '【使用教程】\n1. 登录影巢(hdhive.online)，按F12打开开发者工具。\n2. 切换到"应用(Application)" -> "Cookie"，或"网络(Network)"选项卡，找到发往API的请求。\n3. 复制完整的Cookie字符串。\n4. 确保Cookie中包含 `token` 和 `csrf_access_token` 字段。\n5. 粘贴到上方输入框，启用插件并保存。\n\n⚠️ 影巢需要代理访问，插件会自动使用系统配置的代理。'
+                                            'text': '【使用教程】\n1. 登录影巢站点（具体域名请在上方“站点地址”中填写），按F12打开开发者工具。\n2. 切换到"应用(Application)" -> "Cookie"，或"网络(Network)"选项卡，找到发往API的请求。\n3. 复制完整的Cookie字符串。\n4. 确保Cookie中包含 `token` 和 `csrf_access_token` 字段。\n5. 粘贴到上方输入框，启用插件并保存。\n\n⚠️ 影巢可能变更域名，若签到异常请先更新“站点地址”。插件会自动使用系统配置的代理。'
                                         }
                                     }
                                 ]
@@ -786,6 +809,7 @@ class HdhiveSign(_PluginBase):
             "notify": True,
             "onlyonce": False,
             "cookie": "",
+            "base_url": "https://hdhive.online",
             "cron": "0 8 * * *",
             "max_retries": 3,
             "retry_interval": 30,
