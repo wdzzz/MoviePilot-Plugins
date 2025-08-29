@@ -26,14 +26,19 @@ from app.schemas import NotificationType
 import requests
 from urllib.parse import urlencode
 
+# cloudscraper 作为 Cloudflare 备用方案
+try:
+    import cloudscraper
+    HAS_CLOUDSCRAPER = True
+except Exception:
+    HAS_CLOUDSCRAPER = False
+
 # 尝试导入curl_cffi库，用于绕过CloudFlare防护
 try:
     from curl_cffi import requests as curl_requests
     HAS_CURL_CFFI = True
-    logger.info("成功加载curl_cffi库，可以绕过CloudFlare防护")
 except ImportError:
     HAS_CURL_CFFI = False
-    logger.warning("未安装curl_cffi库，无法绕过CloudFlare防护。建议安装: pip install curl_cffi>=0.5.9")
 
 
 class nodeseeksign(_PluginBase):
@@ -44,7 +49,7 @@ class nodeseeksign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -69,6 +74,11 @@ class nodeseeksign(_PluginBase):
     _retry_count = 0      # 当天重试计数
     _scheduled_retry = None  # 计划的重试任务
     _verify_ssl = False    # 是否验证SSL证书，默认禁用
+    _min_delay = 5         # 请求前最小随机等待（秒）
+    _max_delay = 12        # 请求前最大随机等待（秒）
+    _member_id = ""       # NodeSeek 成员ID（可选，用于获取用户信息）
+
+    _scraper = None        # cloudscraper 实例
 
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
@@ -91,10 +101,27 @@ class nodeseeksign(_PluginBase):
                 self._use_proxy = config.get("use_proxy", True)
                 self._max_retries = int(config.get("max_retries", 3))
                 self._verify_ssl = config.get("verify_ssl", False)
+                self._min_delay = int(config.get("min_delay", 5))
+                self._max_delay = int(config.get("max_delay", 12))
+                self._member_id = (config.get("member_id") or "").strip()
                 
                 logger.info(f"配置: enabled={self._enabled}, notify={self._notify}, cron={self._cron}, "
                            f"random_choice={self._random_choice}, history_days={self._history_days}, "
-                           f"use_proxy={self._use_proxy}, max_retries={self._max_retries}, verify_ssl={self._verify_ssl}")
+                           f"use_proxy={self._use_proxy}, max_retries={self._max_retries}, verify_ssl={self._verify_ssl}, "
+                           f"min_delay={self._min_delay}, max_delay={self._max_delay}, member_id={self._member_id or '未设置'}")
+                # 初始化 cloudscraper（可选，用于绕过 Cloudflare）
+                if HAS_CLOUDSCRAPER:
+                    try:
+                        # 简化初始化，兼容不同 cloudscraper 版本
+                        self._scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+                        # 应用代理
+                        proxies = self._get_proxies()
+                        if proxies:
+                            self._scraper.proxies = proxies
+                            logger.info(f"cloudscraper 初始化代理: {self._scraper.proxies}")
+                        logger.info("cloudscraper 初始化成功")
+                    except Exception as e:
+                        logger.warning(f"cloudscraper 初始化失败: {str(e)}")
             
             if self._onlyonce:
                 logger.info("执行一次性签到")
@@ -114,7 +141,10 @@ class nodeseeksign(_PluginBase):
                     "history_days": self._history_days,
                     "use_proxy": self._use_proxy,
                     "max_retries": self._max_retries,
-                    "verify_ssl": self._verify_ssl
+                    "verify_ssl": self._verify_ssl,
+                    "min_delay": self._min_delay,
+                    "max_delay": self._max_delay,
+                    "member_id": self._member_id
                 })
 
                 # 启动任务
@@ -170,6 +200,9 @@ class nodeseeksign(_PluginBase):
                     )
                 return sign_dict
             
+            # 请求前随机等待
+            self._wait_random_interval()
+
             # 执行API签到
             result = self._run_api_sign()
             
@@ -186,9 +219,17 @@ class nodeseeksign(_PluginBase):
                 # 重置重试计数
                 self._retry_count = 0
                 
+                # 获取用户信息（有成员ID就拉取）
+                user_info = None
+                try:
+                    if getattr(self, "_member_id", ""):
+                        user_info = self._fetch_user_info(self._member_id)
+                except Exception as e:
+                    logger.warning(f"获取用户信息失败: {str(e)}")
+
                 # 发送通知
                 if self._notify:
-                    self._send_sign_notification(sign_dict, result)
+                    self._send_sign_notification(sign_dict, result, user_info)
             else:
                 # 签到失败，安排重试
                 sign_dict = {
@@ -199,7 +240,7 @@ class nodeseeksign(_PluginBase):
                 self._save_sign_history(sign_dict)
                 
                 # 检查是否需要重试
-                if self._retry_count < self._max_retries:
+                if self._max_retries and self._retry_count < self._max_retries:
                     self._retry_count += 1
                     retry_minutes = random.randint(5, 15)
                     retry_time = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=retry_minutes)
@@ -238,13 +279,20 @@ class nodeseeksign(_PluginBase):
                         )
                 else:
                     # 达到最大重试次数，不再重试
-                    logger.warning(f"已达到最大重试次数 ({self._max_retries})，今日不再重试")
+                    if self._max_retries == 0:
+                        logger.info("未配置自动重试 (max_retries=0)，本次结束")
+                    else:
+                        logger.warning(f"已达到最大重试次数 ({self._max_retries})，今日不再重试")
                     
                     if self._notify:
                         self.post_message(
                             mtype=NotificationType.SiteMessage,
                             title="【NodeSeek论坛签到失败】",
-                            text=f"签到失败: {result.get('message', '未知错误')}\n已达到最大重试次数 ({self._max_retries})，今日不再重试\n⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            text=(
+                                f"签到失败: {result.get('message', '未知错误')}\n"
+                                + ("未配置自动重试 (max_retries=0)，本次结束\n" if self._max_retries == 0 else f"已达到最大重试次数 ({self._max_retries})，今日不再重试\n")
+                                + f"⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            )
                         )
             
             return sign_dict
@@ -283,9 +331,19 @@ class nodeseeksign(_PluginBase):
             
             # 准备请求头
             headers = {
-                'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                'origin': "https://www.nodeseek.com",
-                'referer': "https://www.nodeseek.com/board",
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Content-Length': '0',
+                'Origin': 'https://www.nodeseek.com',
+                'Referer': 'https://www.nodeseek.com/board',
+                'Sec-CH-UA': '"Chromium";v="136", "Not:A-Brand";v="24", "Google Chrome";v="136"',
+                'Sec-CH-UA-Mobile': '?0',
+                'Sec-CH-UA-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
                 'Cookie': self._cookie
             }
             
@@ -302,80 +360,63 @@ class nodeseeksign(_PluginBase):
             
             logger.info(f"执行签到请求: {url}")
             
-            # 使用curl_cffi库发送请求以绕过CloudFlare防护
-            if HAS_CURL_CFFI:
-                logger.info("使用curl_cffi绕过CloudFlare防护发送请求")
-                
-                try:
-                    # 创建一个curl_cffi会话
-                    session = curl_requests.Session(impersonate="chrome110")
-                    
-                    # 设置代理（如果有）
-                    if proxies:
-                        # 提取代理URL
-                        http_proxy = proxies.get('http')
-                        if http_proxy:
-                            session.proxies = {"http": http_proxy, "https": http_proxy}
-                    
-                    # 发送POST请求
-                    response = session.post(
-                        url,
-                        headers=headers,
-                        timeout=30,
-                        verify=self._verify_ssl
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"curl_cffi请求失败: {str(e)}")
-                    # 回退到普通请求
-                    response = requests.post(url, headers=headers, proxies=proxies, timeout=30, verify=self._verify_ssl)
-            else:
-                # 使用普通requests发送请求
-                response = requests.post(url, headers=headers, proxies=proxies, timeout=30, verify=self._verify_ssl)
+            # 通过统一请求适配层发送请求（优先 curl_cffi -> cloudscraper -> requests）
+            response = self._smart_post(url=url, headers=headers, data=b'', proxies=proxies, timeout=30)
             
-            # 解析响应
-            if response.status_code == 200:
-                try:
-                    response_data = response.json()
-                    logger.info(f"签到响应: {response_data}")
-                    
-                    message = response_data.get('message', '')
-                    
-                    # 判断签到结果
-                    if "鸡腿" in message or response_data.get('success') == True:
-                        # 签到成功
-                        result["success"] = True
-                        result["signed"] = True
-                        result["message"] = message
-                        logger.info(f"签到成功: {message}")
-                    elif "已完成签到" in message:
-                        # 今日已签到
-                        result["success"] = True
-                        result["already_signed"] = True
-                        result["message"] = message
-                        logger.info(f"今日已签到: {message}")
-                    elif message == "USER NOT FOUND" or response_data.get('status') == 404:
-                        # Cookie失效
-                        result["message"] = "Cookie已失效，请更新"
-                        logger.error("Cookie已失效，请更新")
-                    else:
-                        # 其他失败情况
-                        result["message"] = f"签到失败: {message}"
-                        logger.error(f"签到失败: {message}")
-                
-                except ValueError:
-                    # JSON解析失败
+            # 解析响应（无论状态码是否200，先尝试读取JSON，按 message 判定）
+            try:
+                response_data = response.json()
+                logger.info(f"签到响应: {response_data}")
+                message = response_data.get('message', '')
+                # 判断签到结果（优先以业务语义为准）
+                if "鸡腿" in message or response_data.get('success') is True:
+                    result["success"] = True
+                    result["signed"] = True
+                    result["message"] = message
+                    logger.info(f"签到成功: {message}")
+                elif "已完成签到" in message:
+                    result["success"] = True
+                    result["already_signed"] = True
+                    result["message"] = message
+                    logger.info(f"今日已签到: {message}")
+                elif message == "USER NOT FOUND" or response_data.get('status') == 404:
+                    result["message"] = "Cookie已失效，请更新"
+                    logger.error("Cookie已失效，请更新")
+                else:
+                    result["message"] = message or f"请求失败，状态码: {response.status_code}"
+                    # 若非200则仍记录状态码，便于排查
+                    if response.status_code != 200:
+                        logger.error(f"签到请求非200({response.status_code}): {message}")
+            except ValueError:
+                # 非JSON响应
+                if response.status_code == 200:
                     result["message"] = f"解析响应失败: {response.text[:100]}..."
-                    logger.error(f"解析签到响应失败: {response.text[:100]}...")
-            else:
-                # 非200响应
-                result["message"] = f"请求失败，状态码: {response.status_code}"
-                logger.error(f"签到请求失败，状态码: {response.status_code}, 响应: {response.text[:100]}...")
-                
-                # 检查是否是CloudFlare防护
-                if response.status_code == 403 and ("cloudflare" in response.text.lower() or "cf-" in response.text.lower()):
-                    logger.error("请求被CloudFlare防护拦截，建议安装curl_cffi库绕过防护")
-                    result["message"] += " | 被CloudFlare拦截，请安装curl_cffi库"
+                else:
+                    result["message"] = f"请求失败，状态码: {response.status_code}"
+                logger.error(f"签到响应非JSON({response.status_code}): {response.text[:100]}...")
+
+            # 去除额外CloudFlare提示（全局处理，无需重复提示）
+                # 404/403 时对代理与直连互相回退一次
+                try:
+                    if response.status_code in (403, 404):
+                        if proxies:
+                            logger.info("检测到 403/404，尝试去代理直连回退一次...")
+                            response_retry = self._smart_post(url=url, headers=headers, proxies=None, timeout=30)
+                        else:
+                            logger.info("检测到 403/404，尝试走代理回退一次...")
+                            alt_proxies = self._get_proxies()
+                            response_retry = self._smart_post(url=url, headers=headers, proxies=alt_proxies, timeout=30)
+                        if response_retry and response_retry.status_code == 200:
+                            response_data = response_retry.json()
+                            message = response_data.get('message', '')
+                            if "鸡腿" in message or response_data.get('success') == True:
+                                result.update({"success": True, "signed": True, "message": message})
+                            elif "已完成签到" in message:
+                                result.update({"success": True, "already_signed": True, "message": message})
+                            else:
+                                result["message"] = f"回退后仍失败: {message}"
+                except Exception as e:
+                    logger.warning(f"回退请求失败（忽略）：{str(e)}")
             
             return result
             
@@ -393,6 +434,177 @@ class nodeseeksign(_PluginBase):
         if not self._use_proxy:
             logger.info("未启用代理")
             return None
+        try:
+            if hasattr(settings, 'PROXY') and settings.PROXY:
+                norm = self._normalize_proxies(settings.PROXY)
+                if norm:
+                    return norm
+            logger.warning("系统代理未配置或无效")
+            return None
+        except Exception as e:
+            logger.error(f"获取代理设置出错: {str(e)}")
+            return None
+
+    def _normalize_proxies(self, proxies_input):
+        """
+        归一化代理配置为 requests 兼容格式 {"http": url, "https": url}
+        支持字符串或字典输入。
+        """
+        try:
+            if not proxies_input:
+                return None
+            if isinstance(proxies_input, str):
+                return {"http": proxies_input, "https": proxies_input}
+            if isinstance(proxies_input, dict):
+                http_url = proxies_input.get("http") or proxies_input.get("HTTP") or proxies_input.get("https") or proxies_input.get("HTTPS")
+                https_url = proxies_input.get("https") or proxies_input.get("HTTPS") or proxies_input.get("http") or proxies_input.get("HTTP")
+                if not http_url and not https_url:
+                    return None
+                return {"http": http_url or https_url, "https": https_url or http_url}
+        except Exception as e:
+            logger.warning(f"代理归一化失败，将忽略代理: {str(e)}")
+        return None
+    def _wait_random_interval(self):
+        """
+        在请求前随机等待，模拟人类行为
+        """
+        try:
+            if self._max_delay and self._min_delay and self._max_delay >= self._min_delay:
+                delay = random.uniform(float(self._min_delay), float(self._max_delay))
+                logger.info(f"请求前随机等待 {delay:.2f} 秒...")
+                time.sleep(delay)
+        except Exception as e:
+            logger.debug(f"随机等待失败（忽略）：{str(e)}")
+
+    def _smart_post(self, url, headers=None, data=None, json=None, proxies=None, timeout=30):
+        """
+        统一的POST请求适配器：
+        1) curl_cffi (impersonate Chrome)
+        2) cloudscraper
+        3) requests
+        """
+        last_error = None
+
+        # 1) cloudscraper 优先（与示例一致）
+        if HAS_CLOUDSCRAPER and self._scraper:
+            try:
+                logger.info("使用 cloudscraper 发送请求")
+                if proxies:
+                    self._scraper.proxies = self._normalize_proxies(proxies) or {}
+                    if self._scraper.proxies:
+                        logger.info(f"cloudscraper 已应用代理: {self._scraper.proxies}")
+                if self._verify_ssl:
+                    return self._scraper.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=True)
+                return self._scraper.post(url, headers=headers, data=data, json=json, timeout=timeout)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"cloudscraper 请求失败，将回退：{str(e)}")
+
+        # 2) curl_cffi 次选
+        if HAS_CURL_CFFI:
+            try:
+                logger.info("使用 curl_cffi 发送请求 (Chrome-124 仿真)")
+                session = curl_requests.Session(impersonate="chrome124")
+                if proxies:
+                    session.proxies = self._normalize_proxies(proxies) or {}
+                    if session.proxies:
+                        logger.info(f"curl_cffi 已应用代理: {session.proxies}")
+                if self._verify_ssl:
+                    return session.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=True)
+                return session.post(url, headers=headers, data=data, json=json, timeout=timeout)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"curl_cffi 请求失败，将回退：{str(e)}")
+
+        # 3) requests 兜底
+        try:
+            logger.info("使用 requests 发送请求")
+            norm = self._normalize_proxies(proxies)
+            if norm:
+                logger.info(f"requests 已应用代理: {norm}")
+            if self._verify_ssl:
+                return requests.post(url, headers=headers, data=data, json=json, proxies=norm, timeout=timeout, verify=True)
+            return requests.post(url, headers=headers, data=data, json=json, proxies=norm, timeout=timeout)
+        except Exception as e:
+            logger.error(f"requests 请求失败：{str(e)}")
+            if last_error:
+                logger.error(f"此前错误：{str(last_error)}")
+            raise
+
+    def _smart_get(self, url, headers=None, proxies=None, timeout=30):
+        """
+        统一的GET请求适配器（顺序同 _smart_post）
+        """
+        last_error = None
+        if HAS_CURL_CFFI:
+            try:
+                session = curl_requests.Session(impersonate="chrome124")
+                if proxies:
+                    session.proxies = self._normalize_proxies(proxies) or {}
+                    if session.proxies:
+                        logger.info(f"curl_cffi 已应用代理: {session.proxies}")
+                if self._verify_ssl:
+                    return session.get(url, headers=headers, timeout=timeout, verify=True)
+                return session.get(url, headers=headers, timeout=timeout)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"curl_cffi GET 失败，将回退：{str(e)}")
+        if HAS_CLOUDSCRAPER and self._scraper:
+            try:
+                if proxies:
+                    self._scraper.proxies = self._normalize_proxies(proxies) or {}
+                    if self._scraper.proxies:
+                        logger.info(f"cloudscraper 已应用代理: {self._scraper.proxies}")
+                if self._verify_ssl:
+                    return self._scraper.get(url, headers=headers, timeout=timeout, verify=True)
+                return self._scraper.get(url, headers=headers, timeout=timeout)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"cloudscraper GET 失败，将回退：{str(e)}")
+        try:
+            norm = self._normalize_proxies(proxies)
+            if norm:
+                logger.info(f"requests 已应用代理: {norm}")
+            if self._verify_ssl:
+                return requests.get(url, headers=headers, proxies=norm, timeout=timeout, verify=True)
+            return requests.get(url, headers=headers, proxies=norm, timeout=timeout)
+        except Exception as e:
+            logger.error(f"requests GET 失败：{str(e)}")
+            if last_error:
+                logger.error(f"此前错误：{str(last_error)}")
+            raise
+
+    def _fetch_user_info(self, member_id: str) -> dict:
+        """
+        拉取 NodeSeek 用户信息（可选）
+        """
+        if not member_id:
+            return {}
+        url = f"https://www.nodeseek.com/api/account/getInfo/{member_id}?readme=1"
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Origin": "https://www.nodeseek.com",
+            "Referer": f"https://www.nodeseek.com/space/{member_id}",
+            "Sec-CH-UA": '"Chromium";v="136", "Not:A-Brand";v="24", "Google Chrome";v="136"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        }
+        proxies = self._get_proxies()
+        resp = self._smart_get(url=url, headers=headers, proxies=proxies, timeout=30)
+        try:
+            data = resp.json()
+            detail = data.get("detail") or {}
+            if detail:
+                self.save_data('last_user_info', detail)
+            return detail
+        except Exception:
+            return {}
             
         try:
             # 获取系统代理设置
@@ -446,7 +658,7 @@ class nodeseeksign(_PluginBase):
         except Exception as e:
             logger.error(f"保存签到历史记录失败: {str(e)}", exc_info=True)
 
-    def _send_sign_notification(self, sign_dict, result):
+    def _send_sign_notification(self, sign_dict, result, user_info: dict = None):
         """
         发送签到通知
         """
@@ -465,6 +677,7 @@ class nodeseeksign(_PluginBase):
                 f"━━━━━━━━━━\n"
                 f"🕐 时间：{sign_time}\n"
                 f"✨ 状态：{status}\n"
+                + (f"👤 用户：{user_info.get('member_name')}  等级：{user_info.get('rank')}  鸡腿：{user_info.get('coin')}\n" if user_info else "") +
                 f"━━━━━━━━━━"
             )
             
@@ -476,6 +689,7 @@ class nodeseeksign(_PluginBase):
                 f"━━━━━━━━━━\n"
                 f"🕐 时间：{sign_time}\n"
                 f"✨ 状态：{status}\n"
+                + (f"👤 用户：{user_info.get('member_name')}  等级：{user_info.get('rank')}  鸡腿：{user_info.get('coin')}\n" if user_info else "") +
                 f"ℹ️ 说明：今日已完成签到\n"
                 f"━━━━━━━━━━"
             )
@@ -562,8 +776,9 @@ class nodeseeksign(_PluginBase):
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        # 检测是否安装了curl_cffi库
-        curl_cffi_status = "✅ 已安装" if HAS_CURL_CFFI else "❌ 未安装 (无法绕过CloudFlare防护)"
+        # 状态提示移除CloudFlare相关文案
+        curl_cffi_status = "✅ 已安装" if HAS_CURL_CFFI else "❌ 未安装"
+        cloudscraper_status = "✅ 已启用" if HAS_CLOUDSCRAPER else "❌ 未启用"
         
         return [
             {
@@ -645,7 +860,7 @@ class nodeseeksign(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 6
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -661,7 +876,7 @@ class nodeseeksign(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 6
+                                    'md': 4
                                 },
                                 'content': [
                                     {
@@ -669,6 +884,64 @@ class nodeseeksign(_PluginBase):
                                         'props': {
                                             'model': 'verify_ssl',
                                             'label': '验证SSL证书',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'member_id',
+                                            'label': 'NodeSeek成员ID',
+                                            'placeholder': '可选，用于在通知中展示用户信息'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'min_delay',
+                                            'label': '最小随机延迟(秒)',
+                                            'type': 'number',
+                                            'placeholder': '5'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'max_delay',
+                                            'label': '最大随机延迟(秒)',
+                                            'type': 'number',
+                                            'placeholder': '12'
                                         }
                                     }
                                 ]
@@ -767,7 +1040,7 @@ class nodeseeksign(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': f'【使用教程】\n1. 登录NodeSeek论坛网站，按F12打开开发者工具\n2. 在"网络"或"应用"选项卡中复制Cookie\n3. 粘贴Cookie到上方输入框\n4. 设置签到时间，建议早上8点(0 8 * * *)\n5. 启用插件并保存\n\n【功能说明】\n• 随机奖励：开启则使用随机奖励，关闭则使用固定奖励\n• 使用代理：开启则使用系统配置的代理服务器访问NodeSeek\n• 验证SSL证书：关闭可能解决SSL连接问题，但会降低安全性\n• 失败重试：设置签到失败后的最大重试次数，将在5-15分钟后随机重试\n\n【CloudFlare绕过】\n• curl_cffi库状态: {curl_cffi_status}\n• 如需安装: pip install curl_cffi>=0.5.9'
+                                            'text': f'【使用教程】\n1. 登录NodeSeek论坛网站，按F12打开开发者工具\n2. 在"网络"或"应用"选项卡中复制Cookie\n3. 粘贴Cookie到上方输入框\n4. 设置签到时间，建议早上8点(0 8 * * *)\n5. 启用插件并保存\n\n【功能说明】\n• 随机奖励：开启则使用随机奖励，关闭则使用固定奖励\n• 使用代理：开启则使用系统配置的代理服务器访问NodeSeek\n• 验证SSL证书：关闭可能解决SSL连接问题，但会降低安全性\n• 失败重试：设置签到失败后的最大重试次数，将在5-15分钟后随机重试\n• 随机延迟：请求前随机等待，降低被风控概率\n• 用户信息：配置成员ID后，通知中展示用户名/等级/鸡腿\n\n【环境状态】\n• curl_cffi: {curl_cffi_status}；cloudscraper: {cloudscraper_status}'
                                         }
                                     }
                                 ]
@@ -786,13 +1059,18 @@ class nodeseeksign(_PluginBase):
             "history_days": 30,
             "use_proxy": True,
             "max_retries": 3,
-            "verify_ssl": False
+            "verify_ssl": False,
+            "min_delay": 5,
+            "max_delay": 12,
+            "member_id": ""
         }
 
     def get_page(self) -> List[dict]:
         """
         构建插件详情页面，展示签到历史
         """
+        # 读取缓存的用户信息
+        user_info = self.get_data('last_user_info') or {}
         # 获取签到历史
         historys = self.get_data('sign_history') or []
         
@@ -853,8 +1131,79 @@ class nodeseeksign(_PluginBase):
                 ]
             })
         
+        # 用户信息卡片（可选）
+        user_info_card = []
+        if user_info:
+            member_id = str(user_info.get('member_id') or getattr(self, '_member_id', '') or '').strip()
+            avatar_url = f"https://www.nodeseek.com/avatar/{member_id}.png" if member_id else None
+            user_name = user_info.get('member_name', '-')
+            rank = str(user_info.get('rank', '-'))
+            coin = str(user_info.get('coin', '-'))
+            npost = str(user_info.get('nPost', '-'))
+            ncomment = str(user_info.get('nComment', '-'))
+
+            user_info_card = [
+                {
+                    'component': 'VCard',
+                    'props': {'variant': 'outlined', 'class': 'mb-4'},
+                    'content': [
+                        {'component': 'VCardTitle', 'props': {'class': 'text-h6'}, 'text': '👤 NodeSeek 用户信息'},
+                        {
+                            'component': 'VCardText',
+                            'content': [
+                                {
+                                    'component': 'VRow',
+                                    'props': {'align': 'center'},
+                                    'content': [
+                                        {
+                                            'component': 'VCol',
+                                            'props': {'cols': 12, 'md': 2},
+                                            'content': [
+                                                (
+                                                    {
+                                                        'component': 'VAvatar',
+                                                        'props': {'size': 72, 'class': 'mx-auto'},
+                                                        'content': [
+                                                            {
+                                                                'component': 'VImg',
+                                                                'props': {'src': avatar_url} if avatar_url else {}
+                                                            }
+                                                        ]
+                                                    } if avatar_url else {
+                                                        'component': 'VAvatar',
+                                                        'props': {'size': 72, 'color': 'grey-lighten-2', 'class': 'mx-auto'},
+                                                        'text': user_name[:1]
+                                                    }
+                                                )
+                                            ]
+                                        },
+                                        {
+                                            'component': 'VCol',
+                                            'props': {'cols': 12, 'md': 10},
+                                            'content': [
+                                                {
+                                                    'component': 'VRow',
+                                                    'props': {'class': 'mb-2'},
+                                                    'content': [
+                                                        {'component': 'span', 'props': {'class': 'text-subtitle-1 mr-4'}, 'text': user_name},
+                                                        {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'color': 'primary', 'class': 'mr-2'}, 'text': f'等级 {rank}'},
+                                                        {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'color': 'amber-darken-2', 'class': 'mr-2'}, 'text': f'鸡腿 {coin}'},
+                                                        {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'class': 'mr-2'}, 'text': f'主题 {npost}'},
+                                                        {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined'}, 'text': f'评论 {ncomment}'}
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+
         # 最终页面组装
-        return [
+        return user_info_card + [
             # 标题
             {
                 'component': 'VCard',
