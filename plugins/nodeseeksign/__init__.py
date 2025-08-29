@@ -49,7 +49,7 @@ class nodeseeksign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -365,16 +365,30 @@ class nodeseeksign(_PluginBase):
             
             # 解析响应（无论状态码是否200，先尝试读取JSON，按 message 判定）
             try:
+                # 过滤掉包含 NUL 字符的响应内容
+                response_text = response.text.replace('\x00', '')
+                if response_text != response.text:
+                    logger.warning("响应内容包含 NUL 字符，已过滤")
+                
                 response_data = response.json()
                 logger.info(f"签到响应: {response_data}")
                 message = response_data.get('message', '')
-                # 判断签到结果（优先以业务语义为准）
-                if "鸡腿" in message or response_data.get('success') is True:
+                
+                # 判断签到结果（参考示例脚本逻辑，优先检查success字段）
+                if response_data.get('success') is True:
+                    # 明确成功
                     result["success"] = True
                     result["signed"] = True
                     result["message"] = message
                     logger.info(f"签到成功: {message}")
+                elif "鸡腿" in message:
+                    # 通过消息内容判断成功（兜底）
+                    result["success"] = True
+                    result["signed"] = True
+                    result["message"] = message
+                    logger.info(f"签到成功(通过消息判断): {message}")
                 elif "已完成签到" in message:
+                    # 今日已签到
                     result["success"] = True
                     result["already_signed"] = True
                     result["message"] = message
@@ -383,17 +397,66 @@ class nodeseeksign(_PluginBase):
                     result["message"] = "Cookie已失效，请更新"
                     logger.error("Cookie已失效，请更新")
                 else:
-                    result["message"] = message or f"请求失败，状态码: {response.status_code}"
-                    # 若非200则仍记录状态码，便于排查
-                    if response.status_code != 200:
-                        logger.error(f"签到请求非200({response.status_code}): {message}")
-            except ValueError:
-                # 非JSON响应
-                if response.status_code == 200:
-                    result["message"] = f"解析响应失败: {response.text[:100]}..."
-                else:
-                    result["message"] = f"请求失败，状态码: {response.status_code}"
-                logger.error(f"签到响应非JSON({response.status_code}): {response.text[:100]}...")
+                    # 其他情况，记录消息但不一定算失败
+                    result["message"] = message or f"未知响应: {response.status_code}"
+                    # 如果状态码非200但业务上成功，仍标记为成功
+                    if "签到" in message and ("成功" in message or "完成" in message):
+                        result["success"] = True
+                        result["signed"] = True
+                        logger.info(f"业务成功: {message}")
+                    else:
+                        logger.warning(f"签到响应({response.status_code}): {message}")
+                        
+            except (ValueError, UnicodeDecodeError) as json_error:
+                # 非JSON响应 - 可能是签到成功但返回了其他格式
+                logger.warning(f"JSON解析失败: {str(json_error)}")
+                
+                # 尝试检测编码并重新解码
+                try:
+                    if hasattr(response, 'encoding') and response.encoding:
+                        decoded_text = response.content.decode(response.encoding, errors='ignore')
+                    else:
+                        # 尝试常见编码
+                        for encoding in ['utf-8', 'gbk', 'gb2312', 'latin1']:
+                            try:
+                                decoded_text = response.content.decode(encoding, errors='ignore')
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        else:
+                            decoded_text = response.content.decode('utf-8', errors='ignore')
+                    
+                    # 过滤 NUL 字符
+                    decoded_text = decoded_text.replace('\x00', '')
+                    clean_text = decoded_text[:200] if len(decoded_text) > 200 else decoded_text
+                    
+                    # 检查是否包含成功关键词（即使不是JSON）
+                    if any(keyword in clean_text for keyword in ["鸡腿", "签到成功", "签到完成", "success"]):
+                        result["success"] = True
+                        result["signed"] = True
+                        result["message"] = f"签到成功(非JSON响应): {clean_text[:50]}..."
+                        logger.info(f"签到成功(非JSON): {clean_text[:100]}...")
+                    elif "已完成签到" in clean_text:
+                        result["success"] = True
+                        result["already_signed"] = True
+                        result["message"] = f"今日已签到(非JSON响应): {clean_text[:50]}..."
+                        logger.info(f"今日已签到(非JSON): {clean_text[:100]}...")
+                    else:
+                        if response.status_code == 200:
+                            result["message"] = f"解析响应失败: {clean_text[:50]}..."
+                        else:
+                            result["message"] = f"请求失败，状态码: {response.status_code}"
+                        logger.error(f"签到响应非JSON({response.status_code}): {clean_text[:100]}...")
+                        
+                except Exception as decode_error:
+                    # 兜底处理
+                    logger.error(f"响应解码失败: {str(decode_error)}")
+                    clean_content = response.content[:100] if len(response.content) > 100 else response.content
+                    if response.status_code == 200:
+                        result["message"] = f"解析响应失败: {str(clean_content)}"
+                    else:
+                        result["message"] = f"请求失败，状态码: {response.status_code}"
+                    logger.error(f"签到响应解码失败({response.status_code}): {str(clean_content)}")
 
             # 去除额外CloudFlare提示（全局处理，无需重复提示）
                 # 404/403 时对代理与直连互相回退一次
