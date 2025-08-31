@@ -1581,22 +1581,7 @@ class nodeseeksign(_PluginBase):
                                     }
                                 ]
                             },
-                                                         {
-                                 'component': 'VCol',
-                                 'props': {
-                                     'cols': 12,
-                                     'md': 4
-                                 },
-                                 'content': [
-                                     {
-                                         'component': 'VSwitch',
-                                         'props': {
-                                             'model': 'clear_history',
-                                             'label': '清除历史记录',
-                                         }
-                                     }
-                                 ]
-                             }
+
                         ]
                     },
                     {
