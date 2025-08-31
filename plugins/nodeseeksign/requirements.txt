@@ -1,2 +1,3 @@
 curl_cffi>=0.13.0,<0.14.0
 cloudscraper>=1.2.71
+brotli>=1.0.9

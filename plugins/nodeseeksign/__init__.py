@@ -49,7 +49,7 @@ class nodeseeksign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -66,6 +66,7 @@ class nodeseeksign(_PluginBase):
     _cookie = None
     _notify = False
     _onlyonce = False
+    _clear_history = False  # 新增：是否清除历史记录
     _cron = None
     _random_choice = True  # 是否选择随机奖励，否则选择固定奖励
     _history_days = 30  # 历史保留天数
@@ -97,18 +98,41 @@ class nodeseeksign(_PluginBase):
                 self._cron = config.get("cron")
                 self._onlyonce = config.get("onlyonce")
                 self._random_choice = config.get("random_choice")
-                self._history_days = int(config.get("history_days", 30))
+                # 确保数值类型配置的安全性
+                try:
+                    self._history_days = int(config.get("history_days", 30))
+                except (ValueError, TypeError):
+                    self._history_days = 30
+                    logger.warning("history_days 配置无效，使用默认值 30")
+                
                 self._use_proxy = config.get("use_proxy", True)
-                self._max_retries = int(config.get("max_retries", 3))
+                
+                try:
+                    self._max_retries = int(config.get("max_retries", 3))
+                except (ValueError, TypeError):
+                    self._max_retries = 3
+                    logger.warning("max_retries 配置无效，使用默认值 3")
+                
                 self._verify_ssl = config.get("verify_ssl", False)
-                self._min_delay = int(config.get("min_delay", 5))
-                self._max_delay = int(config.get("max_delay", 12))
+                
+                try:
+                    self._min_delay = int(config.get("min_delay", 5))
+                except (ValueError, TypeError):
+                    self._min_delay = 5
+                    logger.warning("min_delay 配置无效，使用默认值 5")
+                
+                try:
+                    self._max_delay = int(config.get("max_delay", 12))
+                except (ValueError, TypeError):
+                    self._max_delay = 12
+                    logger.warning("max_delay 配置无效，使用默认值 12")
                 self._member_id = (config.get("member_id") or "").strip()
+                self._clear_history = config.get("clear_history", False) # 初始化清除历史记录
                 
                 logger.info(f"配置: enabled={self._enabled}, notify={self._notify}, cron={self._cron}, "
                            f"random_choice={self._random_choice}, history_days={self._history_days}, "
                            f"use_proxy={self._use_proxy}, max_retries={self._max_retries}, verify_ssl={self._verify_ssl}, "
-                           f"min_delay={self._min_delay}, max_delay={self._max_delay}, member_id={self._member_id or '未设置'}")
+                           f"min_delay={self._min_delay}, max_delay={self._max_delay}, member_id={self._member_id or '未设置'}, clear_history={self._clear_history}")
                 # 初始化 cloudscraper（可选，用于绕过 Cloudflare）
                 if HAS_CLOUDSCRAPER:
                     try:
@@ -144,13 +168,38 @@ class nodeseeksign(_PluginBase):
                     "verify_ssl": self._verify_ssl,
                     "min_delay": self._min_delay,
                     "max_delay": self._max_delay,
-                    "member_id": self._member_id
+                    "member_id": self._member_id,
+                    "clear_history": self._clear_history # 保存清除历史记录配置
                 })
 
                 # 启动任务
                 if self._scheduler.get_jobs():
                     self._scheduler.print_jobs()
                     self._scheduler.start()
+
+                # 如果需要清除历史记录，则清空
+                if self._clear_history:
+                    logger.info("检测到清除历史记录标志，开始清空数据...")
+                    self.clear_sign_history()
+                    logger.info("已清除签到历史记录")
+                    # 保存配置，将 clear_history 设置为 False
+                    self.update_config({
+                        "onlyonce": False,
+                        "enabled": self._enabled,
+                        "cookie": self._cookie,
+                        "notify": self._notify,
+                        "cron": self._cron,
+                        "random_choice": self._random_choice,
+                        "history_days": self._history_days,
+                        "use_proxy": self._use_proxy,
+                        "max_retries": self._max_retries,
+                        "verify_ssl": self._verify_ssl,
+                        "min_delay": self._min_delay,
+                        "max_delay": self._max_delay,
+                        "member_id": self._member_id,
+                        "clear_history": False  # 重置为 False
+                    })
+                    logger.info("已保存配置，clear_history 已重置为 False")
 
         except Exception as e:
             logger.error(f"nodeseeksign初始化错误: {str(e)}", exc_info=True)
@@ -165,21 +214,52 @@ class nodeseeksign(_PluginBase):
         try:
             # 检查是否今日已成功签到（通过记录）
             if self._is_already_signed_today():
-                logger.info("根据历史记录，今日已成功签到，跳过本次执行")
+                logger.info("根据历史记录，今日已成功签到，获取签到奖励信息并通知用户")
                 
-                # 创建跳过记录
+                # 获取签到记录作为兜底
+                attendance_record = None
+                try:
+                    attendance_record = self._fetch_attendance_record()
+                except Exception as e:
+                    logger.warning(f"获取签到记录失败: {str(e)}")
+                
+                # 即使已签到，也要获取签到奖励信息并通知用户
                 sign_dict = {
                     "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "跳过: 今日已签到",
+                    "status": "已签到",
+                    "message": "今日已完成签到"
                 }
                 
-                # 发送通知
+                # 添加奖励信息到历史记录
+                if attendance_record and attendance_record.get("gain"):
+                    sign_dict["gain"] = attendance_record.get("gain")
+                    if attendance_record.get("rank"):
+                        sign_dict["rank"] = attendance_record.get("rank")
+                        sign_dict["total_signers"] = attendance_record.get("total_signers")
+                
+                # 保存历史记录
+                self._save_sign_history(sign_dict)
+                
+                # 获取用户信息（有成员ID就拉取）
+                user_info = None
+                try:
+                    if getattr(self, "_member_id", ""):
+                        user_info = self._fetch_user_info(self._member_id)
+                except Exception as e:
+                    logger.warning(f"获取用户信息失败: {str(e)}")
+
+                # 发送通知，告知用户今日已签到并显示奖励信息
                 if self._notify:
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="【NodeSeek论坛重复签到】",
-                        text=f"今日已完成签到，跳过执行\n⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
+                    try:
+                        self._send_sign_notification(sign_dict, {
+                            "success": True,
+                            "already_signed": True,
+                            "message": "今日已完成签到"
+                        }, user_info, attendance_record)
+                        logger.info("已签到状态通知发送成功")
+                    except Exception as e:
+                        logger.error(f"已签到状态通知发送失败: {str(e)}")
+                        # 通知失败不影响主流程，继续执行
                 
                 return sign_dict
             
@@ -206,14 +286,51 @@ class nodeseeksign(_PluginBase):
             # 执行API签到
             result = self._run_api_sign()
             
+            # 如果返回None，说明是特殊处理（时间验证失败），不记录失败历史
+            if result is None:
+                logger.info("签到响应异常，但通过时间验证判断为成功，不记录失败历史")
+                
+                # 获取签到记录来显示奖励信息
+                attendance_record = None
+                try:
+                    attendance_record = self._fetch_attendance_record()
+                except Exception as e:
+                    logger.warning(f"获取签到记录失败: {str(e)}")
+                
+                # 构建消息：签到成功，获得鸡腿 XX
+                message = "签到成功"
+                if attendance_record and attendance_record.get('gain'):
+                    message += f"，获得鸡腿 {attendance_record.get('gain')}"
+                
+                return {
+                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "签到成功",
+                    "message": message
+                }
+            
             # 处理签到结果
             if result["success"]:
-                # 保存签到记录
+                # 获取签到记录作为兜底
+                attendance_record = None
+                try:
+                    attendance_record = self._fetch_attendance_record()
+                except Exception as e:
+                    logger.warning(f"获取签到记录失败: {str(e)}")
+                
+                # 保存签到记录（包含奖励信息）
                 sign_dict = {
                     "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "签到成功" if not result.get("already_signed") else "已签到",
                     "message": result.get("message", "")
                 }
+                
+                # 添加奖励信息到历史记录
+                if attendance_record and attendance_record.get("gain"):
+                    sign_dict["gain"] = attendance_record.get("gain")
+                    if attendance_record.get("rank"):
+                        sign_dict["rank"] = attendance_record.get("rank")
+                        sign_dict["total_signers"] = attendance_record.get("total_signers")
+                
                 self._save_sign_history(sign_dict)
                 self._save_last_sign_date()
                 # 重置重试计数
@@ -229,7 +346,12 @@ class nodeseeksign(_PluginBase):
 
                 # 发送通知
                 if self._notify:
-                    self._send_sign_notification(sign_dict, result, user_info)
+                    try:
+                        self._send_sign_notification(sign_dict, result, user_info, attendance_record)
+                        logger.info("签到成功通知发送成功")
+                    except Exception as e:
+                        logger.error(f"签到成功通知发送失败: {str(e)}")
+                        # 通知失败不影响主流程，继续执行
             else:
                 # 签到失败，安排重试
                 sign_dict = {
@@ -239,13 +361,40 @@ class nodeseeksign(_PluginBase):
                 }
                 self._save_sign_history(sign_dict)
                 
+                # 即使失败也要获取签到记录作为兜底判断
+                attendance_record = None
+                try:
+                    attendance_record = self._fetch_attendance_record()
+                    # 检查签到记录中是否有今日记录，如果有说明实际签到成功了
+                    if attendance_record and attendance_record.get("created_at"):
+                        try:
+                            record_date = datetime.fromisoformat(attendance_record["created_at"].replace('Z', '+00:00'))
+                            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                            if record_date.date() == today.date():
+                                # 今日有签到记录，说明实际签到成功了
+                                logger.info(f"从签到记录发现今日已签到: {attendance_record}")
+                                result["success"] = True
+                                result["already_signed"] = True
+                                result["message"] = "今日已签到（从签到记录确认）"
+                                # 更新签到状态
+                                sign_dict["status"] = "已签到（从记录确认）"
+                                sign_dict["message"] = result["message"]
+                                self._save_sign_history(sign_dict)
+                        except Exception as e:
+                            logger.warning(f"解析签到记录日期失败: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"获取签到记录失败: {str(e)}")
+                
                 # 检查是否需要重试
-                if self._max_retries and self._retry_count < self._max_retries:
+                # 确保 _max_retries 是整数类型
+                max_retries = int(self._max_retries) if self._max_retries is not None else 0
+                
+                if max_retries and self._retry_count < max_retries:
                     self._retry_count += 1
                     retry_minutes = random.randint(5, 15)
                     retry_time = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=retry_minutes)
                     
-                    logger.info(f"签到失败，将在 {retry_minutes} 分钟后重试 (重试 {self._retry_count}/{self._max_retries})")
+                    logger.info(f"签到失败，将在 {retry_minutes} 分钟后重试 (重试 {self._retry_count}/{max_retries})")
                     
                     # 安排重试任务
                     if not self._scheduler:
@@ -268,37 +417,47 @@ class nodeseeksign(_PluginBase):
                         trigger='date',
                         run_date=retry_time,
                         id=self._scheduled_retry,
-                        name=f"NodeSeek论坛签到重试 {self._retry_count}/{self._max_retries}"
+                        name=f"NodeSeek论坛签到重试 {self._retry_count}/{max_retries}"
                     )
                     
                     if self._notify:
                         self.post_message(
                             mtype=NotificationType.SiteMessage,
                             title="【NodeSeek论坛签到失败】",
-                            text=f"签到失败: {result.get('message', '未知错误')}\n将在 {retry_minutes} 分钟后进行第 {self._retry_count}/{self._max_retries} 次重试\n⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            text=f"签到失败: {result.get('message', '未知错误')}\n将在 {retry_minutes} 分钟后进行第 {self._retry_count}/{max_retries} 次重试\n⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                         )
                 else:
                     # 达到最大重试次数，不再重试
-                    if self._max_retries == 0:
+                    if max_retries == 0:
                         logger.info("未配置自动重试 (max_retries=0)，本次结束")
                     else:
-                        logger.warning(f"已达到最大重试次数 ({self._max_retries})，今日不再重试")
+                        logger.warning(f"已达到最大重试次数 ({max_retries})，今日不再重试")
                     
                     if self._notify:
+                        # 构建通知文本
+                        retry_text = "未配置自动重试 (max_retries=0)，本次结束" if max_retries == 0 else f"已达到最大重试次数 ({max_retries})，今日不再重试"
+                        text = f"签到失败: {result.get('message', '未知错误')}\n{retry_text}\n⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        
                         self.post_message(
                             mtype=NotificationType.SiteMessage,
                             title="【NodeSeek论坛签到失败】",
-                            text=(
-                                f"签到失败: {result.get('message', '未知错误')}\n"
-                                + ("未配置自动重试 (max_retries=0)，本次结束\n" if self._max_retries == 0 else f"已达到最大重试次数 ({self._max_retries})，今日不再重试\n")
-                                + f"⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                            )
+                            text=text
                         )
             
             return sign_dict
         
         except Exception as e:
             logger.error(f"NodeSeek签到过程中出错: {str(e)}", exc_info=True)
+            logger.error(f"错误类型: {type(e)}")
+            logger.error(f"错误详情: {str(e)}")
+            
+            # 记录当前状态用于调试
+            try:
+                logger.error(f"当前 sign_dict: {sign_dict}")
+                logger.error(f"当前 result: {result if 'result' in locals() else '未定义'}")
+            except Exception as debug_e:
+                logger.error(f"记录调试信息失败: {str(debug_e)}")
+            
             sign_dict = {
                 "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
                 "status": f"签到出错: {str(e)}",
@@ -365,8 +524,26 @@ class nodeseeksign(_PluginBase):
             
             # 解析响应（无论状态码是否200，先尝试读取JSON，按 message 判定）
             try:
+                # 检查响应头，处理压缩内容
+                content_encoding = response.headers.get('content-encoding', '').lower()
+                if content_encoding == 'br':
+                    logger.info("检测到Brotli压缩响应，尝试解压...")
+                    try:
+                        import brotli
+                        decompressed_content = brotli.decompress(response.content)
+                        response_text = decompressed_content.decode('utf-8')
+                        logger.info("Brotli解压成功")
+                    except ImportError:
+                        logger.warning("未安装brotli库，无法解压Brotli响应")
+                        response_text = response.text
+                    except Exception as e:
+                        logger.warning(f"Brotli解压失败: {str(e)}，使用原始响应")
+                        response_text = response.text
+                else:
+                    response_text = response.text
+                
                 # 过滤掉包含 NUL 字符的响应内容
-                response_text = response.text.replace('\x00', '')
+                response_text = response_text.replace('\x00', '')
                 if response_text != response.text:
                     logger.warning("响应内容包含 NUL 字符，已过滤")
                 
@@ -380,7 +557,15 @@ class nodeseeksign(_PluginBase):
                     result["success"] = True
                     result["signed"] = True
                     result["message"] = message
-                    logger.info(f"签到成功: {message}")
+                    # 记录签到奖励信息
+                    gain = response_data.get('gain', 0)
+                    current = response_data.get('current', 0)
+                    if gain > 0:
+                        result["gain"] = gain
+                        result["current"] = current
+                        logger.info(f"签到成功: {message}, 获得{gain}个鸡腿，当前总计{current}个")
+                    else:
+                        logger.info(f"签到成功: {message}")
                 elif "鸡腿" in message:
                     # 通过消息内容判断成功（兜底）
                     result["success"] = True
@@ -442,16 +627,57 @@ class nodeseeksign(_PluginBase):
                         result["message"] = f"今日已签到(非JSON响应): {clean_text[:50]}..."
                         logger.info(f"今日已签到(非JSON): {clean_text[:100]}...")
                     else:
-                        if response.status_code == 200:
-                            result["message"] = f"解析响应失败: {clean_text[:50]}..."
-                        else:
-                            result["message"] = f"请求失败，状态码: {response.status_code}"
-                        logger.error(f"签到响应非JSON({response.status_code}): {clean_text[:100]}...")
+                        # 特殊处理：如果获取到了签到记录且时间很接近，认为签到成功
+                        try:
+                            # 获取当前时间（UTC）
+                            current_time = datetime.datetime.utcnow()
+                            logger.info(f"当前UTC时间: {current_time}")
+                            
+                            # 尝试获取签到记录来判断是否成功
+                            attendance_record = self._fetch_attendance_record()
+                            if attendance_record and 'created_at' in attendance_record:
+                                record_time_str = attendance_record['created_at']
+                                try:
+                                    # 解析记录时间（UTC格式）
+                                    record_time = datetime.datetime.fromisoformat(record_time_str.replace('Z', '+00:00'))
+                                    # 转换为UTC时间
+                                    if record_time.tzinfo:
+                                        record_time = record_time.replace(tzinfo=None)
+                                    
+                                    # 计算时间差（小时）
+                                    time_diff = abs((current_time - record_time).total_seconds() / 3600)
+                                    logger.info(f"签到记录时间: {record_time}, 时间差: {time_diff:.2f}小时")
+                                    
+                                    # 如果时间差小于2小时，认为签到成功
+                                    if time_diff < 2.0:
+                                        logger.info(f"时间差小于2小时({time_diff:.2f}h)，认为签到成功")
+                                        result["success"] = True
+                                        result["signed"] = True
+                                        
+                                        # 构建消息：签到成功，获得鸡腿 XX
+                                        message = "签到成功"
+                                        if 'gain' in attendance_record:
+                                            message += f"，获得鸡腿 {attendance_record['gain']}"
+                                            result["gain"] = attendance_record['gain']
+                                            logger.info(f"从签到记录获取奖励: {attendance_record['gain']}个鸡腿")
+                                        
+                                        result["message"] = message
+                                        return result
+                                except Exception as time_error:
+                                    logger.warning(f"时间解析失败: {time_error}")
+                            
+                        except Exception as record_error:
+                            logger.warning(f"获取签到记录失败: {record_error}")
+                        
+                        # 如果时间验证失败，不记录失败历史，不发失败通知
+                        logger.warning(f"签到响应非JSON({response.status_code}): {clean_text[:100]}...")
+                        return None  # 返回None表示不处理，不记录失败
                         
                 except Exception as decode_error:
                     # 兜底处理
                     logger.error(f"响应解码失败: {str(decode_error)}")
                     clean_content = response.content[:100] if len(response.content) > 100 else response.content
+                    
                     if response.status_code == 200:
                         result["message"] = f"解析响应失败: {str(clean_content)}"
                     else:
@@ -532,10 +758,16 @@ class nodeseeksign(_PluginBase):
         在请求前随机等待，模拟人类行为
         """
         try:
-            if self._max_delay and self._min_delay and self._max_delay >= self._min_delay:
-                delay = random.uniform(float(self._min_delay), float(self._max_delay))
+            # 确保延迟参数是数值类型
+            min_delay = float(self._min_delay) if self._min_delay is not None else 5.0
+            max_delay = float(self._max_delay) if self._max_delay is not None else 12.0
+            
+            if max_delay >= min_delay and min_delay > 0:
+                delay = random.uniform(min_delay, max_delay)
                 logger.info(f"请求前随机等待 {delay:.2f} 秒...")
                 time.sleep(delay)
+            else:
+                logger.warning(f"延迟参数无效: min_delay={min_delay}, max_delay={max_delay}，跳过随机等待")
         except Exception as e:
             logger.debug(f"随机等待失败（忽略）：{str(e)}")
 
@@ -668,51 +900,133 @@ class nodeseeksign(_PluginBase):
             return detail
         except Exception:
             return {}
-            
+
+    def _fetch_attendance_record(self) -> dict:
+        """
+        拉取签到记录页面作为兜底，获取签到奖励信息
+        """
         try:
-            # 获取系统代理设置
-            if hasattr(settings, 'PROXY') and settings.PROXY:
-                logger.info(f"使用系统代理: {settings.PROXY}")
-                return settings.PROXY
+            url = "https://www.nodeseek.com/api/attendance/board?page=1"
+            headers = {
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Origin": "https://www.nodeseek.com",
+                "Referer": "https://www.nodeseek.com/board",
+                "Sec-CH-UA": '"Chromium";v="136", "Not:A-Brand";v="24", "Google Chrome";v="136"',
+                "Sec-CH-UA-Mobile": "?0",
+                "Sec-CH-UA-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+                "Cookie": self._cookie
+            }
+            proxies = self._get_proxies()
+            resp = self._smart_get(url=url, headers=headers, proxies=proxies, timeout=30)
+            
+            # 处理可能的压缩响应
+            content_encoding = resp.headers.get('content-encoding', '').lower()
+            if content_encoding == 'br':
+                try:
+                    import brotli
+                    decompressed_content = brotli.decompress(resp.content)
+                    response_text = decompressed_content.decode('utf-8')
+                except ImportError:
+                    response_text = resp.text
+                except Exception:
+                    response_text = resp.text
             else:
-                logger.warning("系统代理未配置")
-                return None
+                response_text = resp.text
+            
+            data = resp.json()
+            record = data.get("record", {})
+            if record:
+                # 获取用户排名信息
+                try:
+                    # 直接从API返回的数据中获取排名信息
+                    if "order" in data:
+                        record['rank'] = data.get("order")
+                        record['total_signers'] = data.get("total")
+                        logger.info(f"获取用户签到排名: 第{record['rank']}名，共{record['total_signers']}人")
+                    else:
+                        record['rank'] = None
+                        record['total_signers'] = None
+                        logger.info("API返回数据中未包含排名信息")
+                except Exception as e:
+                    logger.warning(f"获取签到排名失败: {str(e)}")
+                    record['rank'] = None
+                    record['total_signers'] = None
+                
+                self.save_data('last_attendance_record', record)
+                try:
+                    gain = record.get('gain', 0)
+                    created_at = record.get('created_at', '')
+                    rank_info = f"，排名第{record.get('rank', '?')}名" if record.get('rank') else ""
+                    total_info = f"，共{record.get('total_signers', '?')}人" if record.get('total_signers') else ""
+                    logger.info(f"获取签到记录: 获得{gain}个鸡腿，时间{created_at}{rank_info}{total_info}")
+                except Exception as e:
+                    logger.warning(f"记录签到记录信息失败: {str(e)}")
+            return record
         except Exception as e:
-            logger.error(f"获取代理设置出错: {str(e)}")
-            return None
+            logger.warning(f"获取签到记录失败: {str(e)}")
+            return {}
 
     def _save_sign_history(self, sign_data):
         """
         保存签到历史记录
         """
         try:
+            logger.info(f"开始保存签到历史记录，输入数据: {sign_data}")
+            logger.info(f"输入数据类型: {type(sign_data)}")
+            
             # 读取现有历史
             history = self.get_data('sign_history') or []
+            logger.info(f"读取到现有历史记录数量: {len(history)}")
             
             # 确保日期格式正确
             if "date" not in sign_data:
                 sign_data["date"] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+                logger.info(f"添加日期字段: {sign_data['date']}")
                 
             history.append(sign_data)
+            logger.info(f"添加新记录后历史记录数量: {len(history)}")
             
             # 清理旧记录
-            retention_days = int(self._history_days)
+            try:
+                logger.info(f"开始清理旧记录，_history_days: {self._history_days} (类型: {type(self._history_days)})")
+                retention_days = int(self._history_days) if self._history_days is not None else 30
+                logger.info(f"计算得到保留天数: {retention_days}")
+            except (ValueError, TypeError) as e:
+                retention_days = 30
+                logger.warning(f"history_days 类型转换失败: {str(e)}，使用默认值 30")
+            
             now = datetime.now()
             valid_history = []
             
-            for record in history:
+            logger.info(f"开始遍历 {len(history)} 条历史记录进行清理...")
+            for i, record in enumerate(history):
                 try:
+                    logger.info(f"处理第 {i+1} 条记录: {record}")
                     # 尝试将记录日期转换为datetime对象
                     record_date = datetime.strptime(record["date"], '%Y-%m-%d %H:%M:%S')
                     # 检查是否在保留期内
-                    if (now - record_date).days < retention_days:
+                    days_diff = (now - record_date).days
+                    logger.info(f"记录日期: {record_date}, 距今天数: {days_diff}, 保留天数: {retention_days}")
+                    if days_diff < retention_days:
                         valid_history.append(record)
-                except (ValueError, KeyError):
+                        logger.info(f"保留此记录")
+                    else:
+                        logger.info(f"删除过期记录")
+                except (ValueError, KeyError) as e:
                     # 如果记录日期格式不正确，尝试修复
-                    logger.warning(f"历史记录日期格式无效: {record.get('date', '无日期')}")
+                    logger.warning(f"历史记录日期格式无效: {record.get('date', '无日期')}, 错误: {str(e)}")
                     # 添加新的日期并保留记录
                     record["date"] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                     valid_history.append(record)
+                    logger.info(f"修复日期后保留此记录")
+            
+            logger.info(f"清理完成，有效记录数量: {len(valid_history)}")
             
             # 保存历史
             self.save_data(key="sign_history", value=valid_history)
@@ -720,65 +1034,229 @@ class nodeseeksign(_PluginBase):
             
         except Exception as e:
             logger.error(f"保存签到历史记录失败: {str(e)}", exc_info=True)
+            logger.error(f"错误类型: {type(e)}")
+            logger.error(f"输入数据: {sign_data}")
+            logger.error(f"当前 _history_days: {self._history_days} (类型: {type(self._history_days)})")
 
-    def _send_sign_notification(self, sign_dict, result, user_info: dict = None):
+    def clear_sign_history(self):
+        """
+        清除所有签到历史记录
+        """
+        try:
+            # 清空签到历史
+            self.save_data(key="sign_history", value=[])
+            # 清空最后签到时间
+            self.save_data(key="last_sign_date", value="")
+            # 清空用户信息
+            self.save_data(key="last_user_info", value="")
+            # 清空签到记录
+            self.save_data(key="last_attendance_record", value="")
+            logger.info("已清空所有签到相关数据")
+        except Exception as e:
+            logger.error(f"清除签到历史记录失败: {str(e)}", exc_info=True)
+
+    def _send_sign_notification(self, sign_dict, result, user_info: dict = None, attendance_record: dict = None):
         """
         发送签到通知
         """
+        logger.info(f"开始发送签到通知，参数: sign_dict={sign_dict}, result={result}")
+        logger.info(f"user_info 类型: {type(user_info)}, attendance_record 类型: {type(attendance_record)}")
+        
         if not self._notify:
+            logger.info("通知未启用，跳过")
             return
             
         status = sign_dict.get("status", "未知")
         sign_time = sign_dict.get("date", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        logger.info(f"通知状态: {status}, 时间: {sign_time}")
         
         # 构建通知文本
         if "签到成功" in status:
             title = "【✅ NodeSeek论坛签到成功】"
             
-            text = (
-                f"📢 执行结果\n"
-                f"━━━━━━━━━━\n"
-                f"🕐 时间：{sign_time}\n"
-                f"✨ 状态：{status}\n"
-                + (f"👤 用户：{user_info.get('member_name')}  等级：{user_info.get('rank')}  鸡腿：{user_info.get('coin')}\n" if user_info else "") +
+            # 获取奖励信息和排名信息
+            gain_info = ""
+            rank_info = ""
+            try:
+                logger.info(f"开始构建奖励信息，result: {result}")
+                if result.get("gain"):
+                    gain_info = f"🎁 获得: {result.get('gain')}个鸡腿"
+                elif attendance_record and attendance_record.get("gain"):
+                    gain_info = f"🎁 今日获得: {attendance_record.get('gain')}个鸡腿"
+                
+                # 添加排名信息
+                if attendance_record:
+                    if attendance_record.get("rank"):
+                        rank_info = f"🏆 排名: 第{attendance_record.get('rank')}名"
+                        if attendance_record.get("total_signers"):
+                            rank_info += f" (共{attendance_record.get('total_signers')}人)"
+                    elif attendance_record.get("total_signers"):
+                        rank_info = f"📊 今日共{attendance_record.get('total_signers')}人签到"
+                
+                # 组合奖励和排名信息
+                if rank_info:
+                    gain_info = f"{gain_info}\n{rank_info}\n"
+                else:
+                    gain_info = f"{gain_info}\n"
+                    
+                logger.info(f"最终 gain_info: '{gain_info}' (类型: {type(gain_info)})")
+            except Exception as e:
+                logger.warning(f"获取奖励信息失败: {str(e)}")
+                gain_info = ""
+            
+            # 构建用户信息文本
+            user_info_text = ""
+            if user_info:
+                try:
+                    member_name = user_info.get('member_name', '未知')
+                    rank = user_info.get('rank', '未知')
+                    coin = user_info.get('coin', '未知')
+                    user_info_text = f"👤 用户：{member_name}  等级：{rank}  鸡腿：{coin}\n"
+                    logger.info(f"构建用户信息文本: {user_info_text}")
+                except Exception as e:
+                    logger.warning(f"构建用户信息文本失败: {str(e)}")
+                    user_info_text = ""
+            
+            logger.info(f"开始构建通知文本，gain_info: '{gain_info}'")
+            # 构建完整的通知文本
+            text_parts = [
+                f"📢 执行结果",
+                f"━━━━━━━━━━",
+                f"🕐 时间：{sign_time}",
+                f"✨ 状态：{status}",
+                user_info_text.rstrip('\n') if user_info_text else "",
+                gain_info.rstrip('\n') if gain_info else "",
                 f"━━━━━━━━━━"
-            )
+            ]
+            
+            # 过滤空字符串并用换行符连接
+            text = "\n".join([part for part in text_parts if part])
+            logger.info(f"通知文本构建完成，长度: {len(text)}")
             
         elif "已签到" in status:
-            title = "【ℹ️ NodeSeek论坛重复签到】"
+            title = "【ℹ️ NodeSeek论坛今日已签到】"
             
-            text = (
-                f"📢 执行结果\n"
-                f"━━━━━━━━━━\n"
-                f"🕐 时间：{sign_time}\n"
-                f"✨ 状态：{status}\n"
-                + (f"👤 用户：{user_info.get('member_name')}  等级：{user_info.get('rank')}  鸡腿：{user_info.get('coin')}\n" if user_info else "") +
-                f"ℹ️ 说明：今日已完成签到\n"
+            # 获取奖励信息和排名信息
+            gain_info = ""
+            rank_info = ""
+            try:
+                logger.info(f"开始构建已签到状态的奖励信息，attendance_record: {attendance_record}")
+                if attendance_record and attendance_record.get("gain"):
+                    gain_info = f"🎁 今日获得: {attendance_record.get('gain')}个鸡腿"
+                    
+                    # 添加排名信息
+                    if attendance_record.get("rank"):
+                        rank_info = f"🏆 排名: 第{attendance_record.get('rank')}名"
+                        if attendance_record.get("total_signers"):
+                            rank_info += f" (共{attendance_record.get('total_signers')}人)"
+                    elif attendance_record.get("total_signers"):
+                        rank_info = f"📊 今日共{attendance_record.get('total_signers')}人签到"
+                    
+                    # 组合奖励和排名信息
+                    if rank_info:
+                        gain_info = f"{gain_info}\n{rank_info}\n"
+                    else:
+                        gain_info = f"{gain_info}\n"
+                        
+                    logger.info(f"从 attendance_record 获取奖励信息: {gain_info}")
+                logger.info(f"最终 gain_info: '{gain_info}' (类型: {type(gain_info)})")
+            except Exception as e:
+                logger.warning(f"获取奖励信息失败: {str(e)}")
+                gain_info = ""
+            
+            logger.info(f"开始构建已签到状态通知文本，gain_info: '{gain_info}'")
+            # 构建用户信息文本
+            user_info_text = ""
+            if user_info:
+                try:
+                    member_name = user_info.get('member_name', '未知')
+                    rank = user_info.get('rank', '未知')
+                    coin = user_info.get('coin', '未知')
+                    user_info_text = f"👤 用户：{member_name}  等级：{rank}  鸡腿：{coin}\n"
+                    logger.info(f"构建用户信息文本: {user_info_text}")
+                except Exception as e:
+                    logger.warning(f"构建用户信息文本失败: {str(e)}")
+                    user_info_text = ""
+            
+            # 构建完整的通知文本
+            text_parts = [
+                f"📢 执行结果",
+                f"━━━━━━━━━━",
+                f"🕐 时间：{sign_time}",
+                f"✨ 状态：{status}",
+                user_info_text.rstrip('\n') if user_info_text else "",
+                gain_info.rstrip('\n') if gain_info else "",
+                f"ℹ️ 说明：今日已完成签到，显示当前状态和奖励信息",
+                f"💡 提示：即使已签到，插件仍会获取并显示您的奖励情况",
                 f"━━━━━━━━━━"
-            )
+            ]
+            
+            # 过滤空字符串并用换行符连接
+            text = "\n".join([part for part in text_parts if part])
+            logger.info(f"已签到状态通知文本构建完成，长度: {len(text)}")
             
         else:
             title = "【❌ NodeSeek论坛签到失败】"
-            text = (
-                f"📢 执行结果\n"
-                f"━━━━━━━━━━\n"
-                f"🕐 时间：{sign_time}\n"
-                f"❌ 状态：{status}\n"
-                f"━━━━━━━━━━\n"
-                f"💡 可能的解决方法\n"
-                f"• 检查Cookie是否过期\n"
-                f"• 确认站点是否可访问\n"
-                f"• 检查代理设置是否正确\n"
-                f"• 尝试手动登录网站\n"
+            
+            # 获取签到记录信息（如果有的话）
+            record_info = ""
+            try:
+                logger.info(f"开始构建失败状态的记录信息，attendance_record: {attendance_record}")
+                if attendance_record and attendance_record.get("created_at"):
+                    record_date = datetime.fromisoformat(attendance_record["created_at"].replace('Z', '+00:00'))
+                    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                    if record_date.date() == today.date():
+                        record_info = f"📊 签到记录: 今日已获得{attendance_record.get('gain', 0)}个鸡腿"
+                        
+                        # 添加排名信息
+                        if attendance_record.get("rank"):
+                            record_info += f"，排名第{attendance_record.get('rank')}名"
+                            if attendance_record.get("total_signers"):
+                                record_info += f" (共{attendance_record.get('total_signers')}人)"
+                        elif attendance_record.get("total_signers"):
+                            record_info += f"，今日共{attendance_record.get('total_signers')}人签到"
+                        
+                        record_info += "\n"
+                        logger.info(f"构建记录信息: {record_info}")
+                logger.info(f"最终 record_info: '{record_info}' (类型: {type(record_info)})")
+            except Exception as e:
+                logger.warning(f"获取签到记录信息失败: {str(e)}")
+                record_info = ""
+            
+            logger.info(f"开始构建失败状态通知文本，record_info: '{record_info}'")
+            # 构建完整的通知文本
+            text_parts = [
+                f"📢 执行结果",
+                f"━━━━━━━━━━",
+                f"🕐 时间：{sign_time}",
+                f"❌ 状态：{status}",
+                record_info.rstrip('\n') if record_info else "",
+                f"━━━━━━━━━━",
+                f"💡 可能的解决方法",
+                f"• 检查Cookie是否过期",
+                f"• 确认站点是否可访问",
+                f"• 检查代理设置是否正确",
+                f"• 尝试手动登录网站",
                 f"━━━━━━━━━━"
-            )
+            ]
+            
+            # 过滤空字符串并用换行符连接
+            text = "\n".join([part for part in text_parts if part])
+            logger.info(f"失败状态通知文本构建完成，长度: {len(text)}")
             
         # 发送通知
-        self.post_message(
-            mtype=NotificationType.SiteMessage,
-            title=title,
-            text=text
-        )
+        logger.info(f"准备发送通知，标题: {title}")
+        logger.info(f"通知内容长度: {len(text)}")
+        try:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title=title,
+                text=text
+            )
+            logger.info("通知发送成功")
+        except Exception as e:
+            logger.error(f"通知发送失败: {str(e)}")
+            logger.error(f"错误类型: {type(e)}")
     
     def _save_last_sign_date(self):
         """
@@ -892,8 +1370,8 @@ class nodeseeksign(_PluginBase):
                                     {
                                         'component': 'VSwitch',
                                         'props': {
-                                            'model': 'onlyonce',
-                                            'label': '立即运行一次',
+                                            'model': 'random_choice',
+                                            'label': '随机奖励',
                                         }
                                     }
                                 ]
@@ -908,8 +1386,8 @@ class nodeseeksign(_PluginBase):
                                     {
                                         'component': 'VSwitch',
                                         'props': {
-                                            'model': 'random_choice',
-                                            'label': '随机奖励',
+                                            'model': 'onlyonce',
+                                            'label': '立即运行一次',
                                         }
                                     }
                                 ]
@@ -923,7 +1401,7 @@ class nodeseeksign(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 4
+                                    'md': 3
                                 },
                                 'content': [
                                     {
@@ -939,7 +1417,7 @@ class nodeseeksign(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 4
+                                    'md': 3
                                 },
                                 'content': [
                                     {
@@ -955,15 +1433,31 @@ class nodeseeksign(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 4
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'clear_history',
+                                            'label': '清除历史记录',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
                                 },
                                 'content': [
                                     {
                                         'component': 'VTextField',
                                         'props': {
                                             'model': 'member_id',
-                                            'label': 'NodeSeek成员ID',
-                                            'placeholder': '可选，用于在通知中展示用户信息'
+                                            'label': '成员ID（可选）',
+                                            'placeholder': '用于获取用户信息'
                                         }
                                     }
                                 ]
@@ -1086,7 +1580,23 @@ class nodeseeksign(_PluginBase):
                                         }
                                     }
                                 ]
-                            }
+                            },
+                                                         {
+                                 'component': 'VCol',
+                                 'props': {
+                                     'cols': 12,
+                                     'md': 4
+                                 },
+                                 'content': [
+                                     {
+                                         'component': 'VSwitch',
+                                         'props': {
+                                             'model': 'clear_history',
+                                             'label': '清除历史记录',
+                                         }
+                                     }
+                                 ]
+                             }
                         ]
                     },
                     {
@@ -1103,7 +1613,7 @@ class nodeseeksign(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': f'【使用教程】\n1. 登录NodeSeek论坛网站，按F12打开开发者工具\n2. 在"网络"或"应用"选项卡中复制Cookie\n3. 粘贴Cookie到上方输入框\n4. 设置签到时间，建议早上8点(0 8 * * *)\n5. 启用插件并保存\n\n【功能说明】\n• 随机奖励：开启则使用随机奖励，关闭则使用固定奖励\n• 使用代理：开启则使用系统配置的代理服务器访问NodeSeek\n• 验证SSL证书：关闭可能解决SSL连接问题，但会降低安全性\n• 失败重试：设置签到失败后的最大重试次数，将在5-15分钟后随机重试\n• 随机延迟：请求前随机等待，降低被风控概率\n• 用户信息：配置成员ID后，通知中展示用户名/等级/鸡腿\n\n【环境状态】\n• curl_cffi: {curl_cffi_status}；cloudscraper: {cloudscraper_status}'
+                                            'text': f'【使用教程】\n1. 登录NodeSeek论坛网站，按F12打开开发者工具\n2. 在"网络"或"应用"选项卡中复制Cookie\n3. 粘贴Cookie到上方输入框\n4. 设置签到时间，建议早上8点(0 8 * * *)\n5. 启用插件并保存\n\n【功能说明】\n• 随机奖励：开启则使用随机奖励，关闭则使用固定奖励\n• 使用代理：开启则使用系统配置的代理服务器访问NodeSeek\n• 验证SSL证书：关闭可能解决SSL连接问题，但会降低安全性\n• 失败重试：设置签到失败后的最大重试次数，将在5-15分钟后随机重试\n• 随机延迟：请求前随机等待，降低被风控概率\n• 用户信息：配置成员ID后，通知中展示用户名/等级/鸡腿\n• 立即运行一次：手动触发一次签到\n• 清除历史记录：勾选后保存配置，插件将清空所有签到历史、用户信息等数据，使用后会自动关闭\n\n【环境状态】\n• curl_cffi: {curl_cffi_status}；cloudscraper: {cloudscraper_status}'
                                         }
                                     }
                                 ]
@@ -1125,7 +1635,8 @@ class nodeseeksign(_PluginBase):
             "verify_ssl": False,
             "min_delay": 5,
             "max_delay": 12,
-            "member_id": ""
+            "member_id": "",
+            "clear_history": False # 初始化清除历史记录配置
         }
 
     def get_page(self) -> List[dict]:
@@ -1158,7 +1669,33 @@ class nodeseeksign(_PluginBase):
         history_rows = []
         for history in historys:
             status_text = history.get("status", "未知")
-            status_color = "success" if status_text in ["签到成功", "已签到"] else "error"
+            
+            # 判断状态颜色：所有成功状态都是绿色，失败状态是红色
+            success_statuses = ["签到成功", "已签到", "签到成功（时间验证）", "已签到（从记录确认）"]
+            status_color = "success" if status_text in success_statuses else "error"
+            
+            # 获取奖励信息
+            reward_info = "-"
+            try:
+                # 检查是否为成功状态（包括新增的时间验证状态）
+                if any(success_status in status_text for success_status in success_statuses):
+                    # 尝试从历史记录中获取奖励信息
+                    if "gain" in history:
+                        reward_info = f"{history.get('gain', 0)}个鸡腿"
+                        # 如果有排名信息，也显示
+                        if "rank" in history and "total_signers" in history:
+                            reward_info += f" (第{history.get('rank')}名，共{history.get('total_signers')}人)"
+                    else:
+                        # 如果没有直接的奖励信息，尝试从签到记录中获取
+                        attendance_record = self.get_data('last_attendance_record') or {}
+                        if attendance_record and attendance_record.get('gain'):
+                            reward_info = f"{attendance_record.get('gain')}个鸡腿"
+                            # 如果有排名信息，也显示
+                            if attendance_record.get('rank') and attendance_record.get('total_signers'):
+                                reward_info += f" (第{attendance_record.get('rank')}名，共{attendance_record.get('total_signers')}人)"
+            except Exception as e:
+                logger.warning(f"获取奖励信息失败: {str(e)}")
+                reward_info = "-"
             
             history_rows.append({
                 'component': 'tr',
@@ -1186,6 +1723,21 @@ class nodeseeksign(_PluginBase):
                             }
                         ]
                     },
+                    # 奖励列
+                    {
+                        'component': 'td',
+                        'content': [
+                            {
+                                'component': 'VChip',
+                                'props': {
+                                    'color': 'amber-darken-2' if reward_info != "-" else 'grey',
+                                    'size': 'small',
+                                    'variant': 'outlined'
+                                },
+                                'text': reward_info
+                            }
+                        ]
+                    },
                     # 消息列
                     {
                         'component': 'td',
@@ -1196,6 +1748,18 @@ class nodeseeksign(_PluginBase):
         
         # 用户信息卡片（可选）
         user_info_card = []
+        
+        # 初始化用户信息相关变量，避免未定义错误
+        member_id = ""
+        avatar_url = None
+        user_name = "-"
+        rank = "-"
+        coin = "-"
+        npost = "-"
+        ncomment = "-"
+        sign_rank = None
+        total_signers = None
+        
         if user_info:
             member_id = str(user_info.get('member_id') or getattr(self, '_member_id', '') or '').strip()
             avatar_url = f"https://www.nodeseek.com/avatar/{member_id}.png" if member_id else None
@@ -1204,7 +1768,12 @@ class nodeseeksign(_PluginBase):
             coin = str(user_info.get('coin', '-'))
             npost = str(user_info.get('nPost', '-'))
             ncomment = str(user_info.get('nComment', '-'))
-
+            
+            # 获取签到排名信息
+            attendance_record = self.get_data('last_attendance_record') or {}
+            sign_rank = attendance_record.get('rank')
+            total_signers = attendance_record.get('total_signers')
+            
             user_info_card = [
                 {
                     'component': 'VCard',
@@ -1253,7 +1822,11 @@ class nodeseeksign(_PluginBase):
                                                         {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'color': 'amber-darken-2', 'class': 'mr-2'}, 'text': f'鸡腿 {coin}'},
                                                         {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'class': 'mr-2'}, 'text': f'主题 {npost}'},
                                                         {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined'}, 'text': f'评论 {ncomment}'}
-                                                    ]
+                                                    ] + ([
+                                                        # 添加签到排名信息
+                                                        {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'color': 'success', 'class': 'mr-2'}, 'text': f'签到排名 {sign_rank}'},
+                                                        {'component': 'VChip', 'props': {'size': 'small', 'variant': 'outlined', 'color': 'info', 'class': 'mr-2'}, 'text': f'总人数 {total_signers}'}
+                                                    ] if sign_rank and total_signers else [])
                                                 }
                                             ]
                                         }
@@ -1296,6 +1869,7 @@ class nodeseeksign(_PluginBase):
                                                 'content': [
                                                     {'component': 'th', 'text': '时间'},
                                                     {'component': 'th', 'text': '状态'},
+                                                    {'component': 'th', 'text': '奖励'},
                                                     {'component': 'th', 'text': '消息'}
                                                 ]
                                             }
