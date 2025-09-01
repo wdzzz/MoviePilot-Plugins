@@ -49,7 +49,7 @@ class nodeseeksign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
     # 插件作者
     plugin_author = "madrays"
     # 作者主页
@@ -225,7 +225,7 @@ class nodeseeksign(_PluginBase):
                 
                 # 即使已签到，也要获取签到奖励信息并通知用户
                 sign_dict = {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                    "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "已签到",
                     "message": "今日已完成签到"
                 }
@@ -267,7 +267,7 @@ class nodeseeksign(_PluginBase):
             if not self._cookie:
                 logger.error("未配置Cookie")
                 sign_dict = {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                    "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "签到失败: 未配置Cookie",
                 }
                 self._save_sign_history(sign_dict)
@@ -302,11 +302,46 @@ class nodeseeksign(_PluginBase):
                 if attendance_record and attendance_record.get('gain'):
                     message += f"，获得鸡腿 {attendance_record.get('gain')}"
                 
-                return {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                    "status": "签到成功",
+                # 保存签到记录（包含奖励信息）
+                sign_dict = {
+                    "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "status": "签到成功（时间验证）",
                     "message": message
                 }
+                
+                # 添加奖励信息到历史记录
+                if attendance_record and attendance_record.get("gain"):
+                    sign_dict["gain"] = attendance_record.get("gain")
+                    if attendance_record.get("rank"):
+                        sign_dict["rank"] = attendance_record.get("rank")
+                        sign_dict["total_signers"] = attendance_record.get("total_signers")
+                
+                # 保存历史记录
+                self._save_sign_history(sign_dict)
+                self._save_last_sign_date()
+                
+                # 获取用户信息（有成员ID就拉取）
+                user_info = None
+                try:
+                    if getattr(self, "_member_id", ""):
+                        user_info = self._fetch_user_info(self._member_id)
+                except Exception as e:
+                    logger.warning(f"获取用户信息失败: {str(e)}")
+
+                # 发送通知
+                if self._notify:
+                    try:
+                        self._send_sign_notification(sign_dict, {
+                            "success": True,
+                            "signed": True,
+                            "message": message
+                        }, user_info, attendance_record)
+                        logger.info("签到成功（时间验证）通知发送成功")
+                    except Exception as e:
+                        logger.error(f"签到成功（时间验证）通知发送失败: {str(e)}")
+                        # 通知失败不影响主流程，继续执行
+                
+                return sign_dict
             
             # 处理签到结果
             if result["success"]:
@@ -319,7 +354,7 @@ class nodeseeksign(_PluginBase):
                 
                 # 保存签到记录（包含奖励信息）
                 sign_dict = {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                    "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "签到成功" if not result.get("already_signed") else "已签到",
                     "message": result.get("message", "")
                 }
@@ -355,7 +390,7 @@ class nodeseeksign(_PluginBase):
             else:
                 # 签到失败，安排重试
                 sign_dict = {
-                    "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                    "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "status": "签到失败",
                     "message": result.get("message", "")
                 }
@@ -459,7 +494,7 @@ class nodeseeksign(_PluginBase):
                 logger.error(f"记录调试信息失败: {str(debug_e)}")
             
             sign_dict = {
-                "date": datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
+                "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 "status": f"签到出错: {str(e)}",
             }
             self._save_sign_history(sign_dict)
@@ -630,7 +665,7 @@ class nodeseeksign(_PluginBase):
                         # 特殊处理：如果获取到了签到记录且时间很接近，认为签到成功
                         try:
                             # 获取当前时间（UTC）
-                            current_time = datetime.datetime.utcnow()
+                            current_time = datetime.utcnow()
                             logger.info(f"当前UTC时间: {current_time}")
                             
                             # 尝试获取签到记录来判断是否成功
@@ -639,7 +674,7 @@ class nodeseeksign(_PluginBase):
                                 record_time_str = attendance_record['created_at']
                                 try:
                                     # 解析记录时间（UTC格式）
-                                    record_time = datetime.datetime.fromisoformat(record_time_str.replace('Z', '+00:00'))
+                                    record_time = datetime.fromisoformat(record_time_str.replace('Z', '+00:00'))
                                     # 转换为UTC时间
                                     if record_time.tzinfo:
                                         record_time = record_time.replace(tzinfo=None)
@@ -986,7 +1021,7 @@ class nodeseeksign(_PluginBase):
             
             # 确保日期格式正确
             if "date" not in sign_data:
-                sign_data["date"] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+                sign_data["date"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 logger.info(f"添加日期字段: {sign_data['date']}")
                 
             history.append(sign_data)
@@ -1022,7 +1057,7 @@ class nodeseeksign(_PluginBase):
                     # 如果记录日期格式不正确，尝试修复
                     logger.warning(f"历史记录日期格式无效: {record.get('date', '无日期')}, 错误: {str(e)}")
                     # 添加新的日期并保留记录
-                    record["date"] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+                    record["date"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     valid_history.append(record)
                     logger.info(f"修复日期后保留此记录")
             
