@@ -4,7 +4,7 @@
     "description": "镜客居论坛自动签到，获取积分奖励",
     "labels": "签到",
     "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fnos.ico",
+    "icon": "https://raw.githubusercontent.com/wdcmz/MoviePilot-Plugins/main/icons/fnos.ico",
     "author": "wdcmz",
     "level": 2,
     "v2": true,
