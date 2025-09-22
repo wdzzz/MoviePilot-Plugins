@@ -1,18 +1,15 @@
 {
   "fnossign": {
-    "name": "飞牛论坛签到",
-    "description": "自动完成飞牛论坛每日签到，支持失败重试和历史记录",
+    "name": "镜客居签到",
+    "description": "镜客居论坛自动签到，获取积分奖励",
     "labels": "签到",
-    "version": "2.5.4",
+    "version": "1.0.0",
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fnos.ico",
-    "author": "madrays",
+    "author": "wdcmz",
     "level": 2,
     "v2": true,
     "history": {
-      "v2.5.4": "尝试解决0点签到卡住（尽量还是别设置0点签到，暂时无法验证是否解决）",
-      "v2.5.3": "增强重试机制，解决定时任务卡住问题，超出重试次数后自动安排延迟重试",
-      "v2.5.2": "修复手动签到时会产生重复记录的问题",
-      "v2.5.1": "修复签到成功后，未能正确获取签到状态的bug。"
+      "1.0.0": "test"
     }
   }
 
