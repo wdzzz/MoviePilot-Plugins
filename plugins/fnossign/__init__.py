@@ -22,7 +22,7 @@ class JingKeJuSignin(_PluginBase):
     # 插件描述
     plugin_desc = "镜客居论坛自动签到，获取积分奖励。"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fnos.ico"
+    plugin_icon = "https://raw.githubusercontent.com/wdcmz/MoviePilot-Plugins/main/icons/fnos.ico"
     # 插件版本
     plugin_version = "1.0.0"
     # 插件作者
